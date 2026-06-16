@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gollery</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/lucide-static@latest/font/lucide.css"
+    />
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="logo">Gollery</div>
+      <form
+        class="upload-form"
+        hx-post="/upload"
+        hx-encoding="multipart/form-data"
+        hx-swap="none"
+      >
+        <input
+          id="file-input"
+          type="file"
+          name="photos"
+          multiple
+          hidden
+          onchange="htmx.trigger(this.form, 'submit')"
+        />
+
+        <label for="file-input" class="upload-button"> Upload </label>
+      </form>
+    </header>
+    <main class="content">
+      <div class="gallery-header">
+        <h1>Sua biblioteca</h1>
+        <span>{{ len .Photos }} fotos</span>
+      </div>
+      <div class="gallery">
+        {{ range .Photos }}
+        <div class="photo-card">
+          <a href="/media/{{ .Name }}" target="_blank">
+            <img loading="lazy" src="/media/{{ .Name }}" alt="{{ .Name }}" />
+          </a>
+          <button
+            class="delete-button"
+            hx-delete="/delete?file={{ .Name }}"
+            hx-target="closest .photo-card"
+            hx-swap="delete"
+            hx-confirm="Remover esta foto?"
+          >
+            <i class="icon-trash"></i>
+          </button>
+        </div>
+        {{ end }}
+      </div>
+    </main>
+  </body>
+</html>
