@@ -32,26 +32,58 @@
         <label for="file-input" class="upload-button"> Upload </label>
       </form>
     </header>
+
     <main class="content">
       <div class="gallery-header">
         <h1>Sua biblioteca</h1>
         <span>{{ len .Photos }} fotos</span>
       </div>
+
       <div class="gallery">
         {{ range .Photos }}
         <div class="photo-card">
           <a href="/media/{{ .Name }}" target="_blank">
+            {{ if or (eq .Ext ".mp4") (eq .Ext ".webm") (eq .Ext ".ogg") (eq
+            .Ext ".mov") (eq .Ext ".mkv") }}
+            <video muted preload="metadata" src="/media/{{ .Name }}"></video>
+
+            {{ else if or (eq .Ext ".jpg") (eq .Ext ".jpeg") (eq .Ext ".png")
+            (eq .Ext ".gif") (eq .Ext ".webp") (eq .Ext ".bmp") (eq .Ext ".svg")
+            }}
             <img loading="lazy" src="/media/{{ .Name }}" alt="{{ .Name }}" />
+
+            {{ else }}
+            <div class="file-card">{{ .Ext }}</div>
+            {{ end }}
           </a>
-          <button
-            class="delete-button"
-            hx-delete="/delete?file={{ .Name }}"
-            hx-target="closest .photo-card"
-            hx-swap="delete"
-            hx-confirm="Remover esta foto?"
-          >
-            <i class="icon-trash"></i>
-          </button>
+
+          <div class="card-footer">
+            <div class="file-info">
+              {{ if or (eq .Ext ".mp4") (eq .Ext ".webm") (eq .Ext ".ogg") (eq
+              .Ext ".mov") (eq .Ext ".mkv") }}
+              <i class="icon-video"></i>
+
+              {{ else if or (eq .Ext ".jpg") (eq .Ext ".jpeg") (eq .Ext ".png")
+              (eq .Ext ".gif") (eq .Ext ".webp") (eq .Ext ".bmp") (eq .Ext
+              ".svg") }}
+              <i class="icon-image"></i>
+
+              {{ else }}
+              <i class="icon-file"></i>
+              {{ end }}
+
+              <span class="file-name">{{ .Name }}</span>
+            </div>
+
+            <button
+              class="delete-button"
+              hx-delete="/delete?file={{ .Name }}"
+              hx-target="closest .photo-card"
+              hx-swap="delete"
+            >
+              <i class="icon-trash"></i>
+            </button>
+          </div>
         </div>
         {{ end }}
       </div>

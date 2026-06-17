@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 type Photo struct {
 	Name string
+	Ext string
 }
 
 type PageData struct {
@@ -73,8 +75,11 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+
 		photos = append(photos, Photo{
 			Name: entry.Name(),
+			Ext: ext,
 		})
 	}
 
