@@ -37,19 +37,20 @@ body {
 }
 
 .upload-button {
-  border: none;
-  border-radius: 50px;
-
-  padding: 10px 18px;
-
+  border: 1px solid #dadce0;
   cursor: pointer;
+  border-radius: 50%;
+  font-size: 18px;
 
-  font-size: 12px;
-  font-weight: 500;
+  width: 40px;
+  height: 40px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
 
   transition: 0.2s;
   background: white;
-  border: 1px solid #dadce0;
 }
 
 .upload-button:hover {
@@ -86,46 +87,38 @@ body {
   gap: 10px;
 }
 
-.photo-card {
+.file-card {
   display: block;
-
   overflow: hidden;
-
   border-radius: 9px;
-
   background: white;
-
   transition:
     transform 0.2s,
     box-shadow 0.2s;
 }
 
-.photo-card:hover {
+.file-card:hover {
   transform: translateY(-2px);
-
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
 }
 
-.photo-card img,
-.photo-card video {
+.file-card img,
+.file-card video,
+.file-card iframe {
   width: 100%;
   height: 260px;
   object-fit: cover;
   display: block;
 }
 
-.file-card {
+.file-card-not-media {
   width: 100%;
   height: 260px;
-
   display: flex;
   align-items: center;
   justify-content: center;
-
   background: linear-gradient(135deg, #f8f9fa, #eceff1);
-
   color: #5f6368;
-
   font-size: 42px;
   font-weight: 700;
   letter-spacing: 2px;
@@ -134,13 +127,12 @@ body {
   user-select: none;
 }
 
-.photo-card a {
+.file-card a {
   text-decoration: none;
 }
 
 .delete-button {
   margin: 6px;
-  border: none;
   cursor: pointer;
   border-radius: 50%;
   font-size: 18px;
@@ -200,8 +192,9 @@ body {
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   }
 
-  .photo-card img,
-  .photo-card video,
+  .file-card img,
+  .file-card video,
+  .file-card iframe,
   .file-card {
     height: 180px;
   }
