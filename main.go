@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"embed"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"html/template"
 	"io"
 	"io/fs"
@@ -21,25 +23,29 @@ import (
 	"syscall"
 	"time"
 	"unicode"
-	"embed"
 )
 
-const (
-	mediaDirectory = "media"
-	maxUploadSize  = 100 << 20
-)
+const mediaDirectory = "media"
 
 var (
-	errFileTooLarge = errors.New("file exceeds maximum upload size")
+	errInsufficientStorage = errors.New("not enough free storage space")
+
+	videoExtensions = map[string]bool{
+		".mp4": true, ".webm": true, ".ogg": true, ".mov": true, ".mkv": true,
+	}
+
+	imageExtensions = map[string]bool{
+		".jpg": true, ".jpeg": true, ".png": true, ".gif": true,
+		".webp": true, ".bmp": true, ".svg": true,
+	}
 
 	//go:embed web/*
 	embeddedFiles embed.FS
 
 	tmpl = template.Must(
-		template.ParseFS(
-			embeddedFiles,
-			"web/index.html",
-		),
+		template.New("index.html").
+			Funcs(template.FuncMap{"formatBytes": formatBytes}).
+			ParseFS(embeddedFiles, "web/index.html"),
 	)
 )
 
@@ -48,13 +54,34 @@ type File struct {
 	Name        string
 	ServerName  string
 	Ext         string
+	Kind        string // "image", "video" ou "other"
 	MIMEType    string
 	Size        int64
 	CreatedDate time.Time
 }
 
+// StorageStats resume o uso de armazenamento da galeria e do disco.
+type StorageStats struct {
+	FileCount  int
+	UsedBytes  int64 // soma do tamanho dos arquivos da galeria
+	HasDisk    bool
+	DiskTotal  int64
+	DiskFree   int64
+	GalleryPct float64 // % do disco ocupado pela galeria
+	OtherPct   float64 // % do disco ocupado por outros dados
+}
+
 type FileData struct {
 	Files []File
+	Stats StorageStats
+	Sort  string
+	Order string
+}
+
+// SortOptions descreve a ordenação pedida pelo cliente.
+type SortOptions struct {
+	By    string // "date", "name" ou "type"
+	Order string // "asc" ou "desc"
 }
 
 func main() {
@@ -144,7 +171,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	renderAllFiles(w)
+	renderAllFiles(w, sortOptionsFromRequest(r))
 }
 
 func filesHandler(w http.ResponseWriter, r *http.Request) {
@@ -157,7 +184,17 @@ func filesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	renderAllFiles(w)
+	opts := sortOptionsFromRequest(r)
+
+	// Requisições HTMX recebem apenas o fragmento da lista; o resto, a página.
+	w.Header().Add("Vary", "HX-Request")
+
+	if r.Header.Get("HX-Request") == "true" {
+		renderAllFilesList(w, opts)
+		return
+	}
+
+	renderAllFiles(w, opts)
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -191,24 +228,142 @@ func requireMethod(w http.ResponseWriter, r *http.Request, methods ...string) bo
 	return false
 }
 
-func renderAllFiles(w http.ResponseWriter) {
-	files, err := getAllFiles()
-	if err != nil {
-		log.Printf("list files error: %v", err)
-		http.Error(w, "unable to list files", http.StatusInternalServerError)
-		return
+// sortOptionsFromRequest lê ?sort=date|name|type&order=asc|desc, aceitando
+// apenas valores conhecidos.
+func sortOptionsFromRequest(r *http.Request) SortOptions {
+	query := r.URL.Query()
+
+	by := query.Get("sort")
+
+	switch by {
+	case "date", "name", "type":
+	default:
+		by = "date"
 	}
 
-	var output bytes.Buffer
+	order := query.Get("order")
 
-	if err := tmpl.Execute(&output, FileData{
-		Files: files,
-	}); err != nil {
-		log.Printf("template execution error: %v", err)
-		http.Error(w, "unable to render page", http.StatusInternalServerError)
-		return
+	if order != "asc" && order != "desc" {
+		if by == "date" {
+			order = "desc"
+		} else {
+			order = "asc"
+		}
 	}
 
+	return SortOptions{By: by, Order: order}
+}
+
+func compareNames(a, b File) int {
+	result := strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
+
+	if result == 0 {
+		result = strings.Compare(a.Id, b.Id)
+	}
+
+	return result
+}
+
+func sortFiles(files []File, opts SortOptions) {
+	sort.SliceStable(files, func(i, j int) bool {
+		a, b := files[i], files[j]
+
+		var result int
+
+		switch opts.By {
+		case "name":
+			result = compareNames(a, b)
+
+		case "type":
+			result = strings.Compare(a.Ext, b.Ext)
+
+			if result == 0 {
+				result = compareNames(a, b)
+			}
+
+		default: // date
+			switch {
+			case a.CreatedDate.Before(b.CreatedDate):
+				result = -1
+			case a.CreatedDate.After(b.CreatedDate):
+				result = 1
+			default:
+				result = compareNames(a, b)
+			}
+		}
+
+		if opts.Order == "desc" {
+			return result > 0
+		}
+
+		return result < 0
+	})
+}
+
+func buildStats(files []File) StorageStats {
+	stats := StorageStats{FileCount: len(files)}
+
+	for _, file := range files {
+		stats.UsedBytes += file.Size
+	}
+
+	total, free, ok := diskUsage(mediaDirectory)
+
+	if !ok || total <= 0 {
+		return stats
+	}
+
+	other := total - free - stats.UsedBytes
+
+	if other < 0 {
+		other = 0
+	}
+
+	stats.HasDisk = true
+	stats.DiskTotal = total
+	stats.DiskFree = free
+	stats.GalleryPct = roundPercent(float64(stats.UsedBytes) / float64(total) * 100)
+	stats.OtherPct = roundPercent(float64(other) / float64(total) * 100)
+
+	if sum := stats.GalleryPct + stats.OtherPct; sum > 100 {
+		stats.OtherPct = roundPercent(100 - stats.GalleryPct)
+	}
+
+	return stats
+}
+
+func roundPercent(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+
+	if value > 100 {
+		return 100
+	}
+
+	return float64(int(value*100+0.5)) / 100
+}
+
+func formatBytes(n int64) string {
+	const unit = 1024
+
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+
+	divisor, exp := int64(unit), 0
+
+	for remaining := n / unit; remaining >= unit; remaining /= unit {
+		divisor *= unit
+		exp++
+	}
+
+	value := fmt.Sprintf("%.1f %cB", float64(n)/float64(divisor), "KMGTPE"[exp])
+
+	return strings.Replace(value, ".", ",", 1)
+}
+
+func writeHTML(w http.ResponseWriter, output *bytes.Buffer) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	if _, err := w.Write(output.Bytes()); err != nil {
@@ -216,13 +371,51 @@ func renderAllFiles(w http.ResponseWriter) {
 	}
 }
 
-func renderAllFilesList(w http.ResponseWriter) {
+// writeOOB escreve os fragmentos "out-of-band" (contador e armazenamento) que
+// o HTMX aplica em elementos fora do alvo principal da requisição.
+func writeOOB(output *bytes.Buffer, files []File) error {
+	if err := tmpl.ExecuteTemplate(output, "file-count", len(files)); err != nil {
+		return err
+	}
+
+	return tmpl.ExecuteTemplate(output, "storage-stats", buildStats(files))
+}
+
+func renderAllFiles(w http.ResponseWriter, opts SortOptions) {
 	files, err := getAllFiles()
 	if err != nil {
 		log.Printf("list files error: %v", err)
 		http.Error(w, "unable to list files", http.StatusInternalServerError)
 		return
 	}
+
+	sortFiles(files, opts)
+
+	var output bytes.Buffer
+
+	if err := tmpl.Execute(&output, FileData{
+		Files: files,
+		Stats: buildStats(files),
+		Sort:  opts.By,
+		Order: opts.Order,
+	}); err != nil {
+		log.Printf("template execution error: %v", err)
+		http.Error(w, "unable to render page", http.StatusInternalServerError)
+		return
+	}
+
+	writeHTML(w, &output)
+}
+
+func renderAllFilesList(w http.ResponseWriter, opts SortOptions) {
+	files, err := getAllFiles()
+	if err != nil {
+		log.Printf("list files error: %v", err)
+		http.Error(w, "unable to list files", http.StatusInternalServerError)
+		return
+	}
+
+	sortFiles(files, opts)
 
 	var output bytes.Buffer
 
@@ -234,20 +427,17 @@ func renderAllFilesList(w http.ResponseWriter) {
 		}
 	}
 
-	if err := tmpl.ExecuteTemplate(&output, "file-count", len(files)); err != nil {
-		log.Printf("file count template execution error: %v", err)
-		http.Error(w, "unable to render file count", http.StatusInternalServerError)
+	if err := writeOOB(&output, files); err != nil {
+		log.Printf("oob template execution error: %v", err)
+		http.Error(w, "unable to render page", http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-	if _, err := w.Write(output.Bytes()); err != nil {
-		log.Printf("response write error: %v", err)
-	}
+	writeHTML(w, &output)
 }
 
-func renderFileCount(w http.ResponseWriter) {
+// renderStats responde apenas com contador e armazenamento atualizados.
+func renderStats(w http.ResponseWriter) {
 	files, err := getAllFiles()
 	if err != nil {
 		log.Printf("list files error: %v", err)
@@ -257,19 +447,16 @@ func renderFileCount(w http.ResponseWriter) {
 
 	var output bytes.Buffer
 
-	if err := tmpl.ExecuteTemplate(&output, "file-count", len(files)); err != nil {
-		log.Printf("file count template execution error: %v", err)
-		http.Error(w, "unable to render file count", http.StatusInternalServerError)
+	if err := writeOOB(&output, files); err != nil {
+		log.Printf("oob template execution error: %v", err)
+		http.Error(w, "unable to render stats", http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-	if _, err := w.Write(output.Bytes()); err != nil {
-		log.Printf("response write error: %v", err)
-	}
+	writeHTML(w, &output)
 }
 
+// getAllFiles lista os arquivos da galeria, sem ordem definida.
 func getAllFiles() ([]File, error) {
 	entries, err := os.ReadDir(mediaDirectory)
 	if err != nil {
@@ -292,11 +479,18 @@ func getAllFiles() ([]File, error) {
 		files = append(files, file)
 	}
 
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Name > files[j].Name
-	})
-
 	return files, nil
+}
+
+func fileKind(ext string) string {
+	switch {
+	case videoExtensions[ext]:
+		return "video"
+	case imageExtensions[ext]:
+		return "image"
+	default:
+		return "other"
+	}
 }
 
 func fileFromEntry(entry fs.DirEntry) (File, bool, error) {
@@ -330,6 +524,7 @@ func fileFromEntry(entry fs.DirEntry) (File, bool, error) {
 		Name:        originalName,
 		ServerName:  entry.Name(),
 		Ext:         ext,
+		Kind:        fileKind(ext),
 		MIMEType:    mimeType,
 		Size:        info.Size(),
 		CreatedDate: info.ModTime(),
@@ -421,7 +616,14 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
+	// Sem limite fixo de tamanho: o único limite é o espaço livre no disco.
+	// Quando o cliente informa o tamanho total, recusa cedo, antes de ler o corpo.
+	if r.ContentLength > 0 {
+		if _, free, ok := diskUsage(mediaDirectory); ok && r.ContentLength > free {
+			http.Error(w, "not enough free storage space", http.StatusInsufficientStorage)
+			return
+		}
+	}
 
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -467,8 +669,8 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		if saveErr != nil {
 			rollbackUploadedFiles(savedFiles)
 
-			if isUploadTooLarge(saveErr) {
-				http.Error(w, "upload exceeds maximum size", http.StatusRequestEntityTooLarge)
+			if isNoSpace(saveErr) {
+				http.Error(w, "not enough free storage space", http.StatusInsufficientStorage)
 				return
 			}
 
@@ -492,7 +694,9 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	renderAllFilesList(w)
+	// O cliente envia um arquivo por requisição (para mostrar o progresso) e
+	// recarrega a lista uma única vez ao final, então não há corpo na resposta.
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func savePart(part *multipart.Part) (File, error) {
@@ -507,19 +711,12 @@ func savePart(part *multipart.Part) (File, error) {
 
 	defer os.Remove(tempPath)
 
-	size, copyErr := io.Copy(
-		tempFile,
-		io.LimitReader(part, maxUploadSize+1),
-	)
+	_, copyErr := io.Copy(tempFile, part)
 
 	closeErr := tempFile.Close()
 
 	if copyErr != nil {
 		return File{}, copyErr
-	}
-
-	if size > maxUploadSize {
-		return File{}, errFileTooLarge
 	}
 
 	if closeErr != nil {
@@ -561,6 +758,7 @@ func savePart(part *multipart.Part) (File, error) {
 			Name:        originalName,
 			ServerName:  serverName,
 			Ext:         ext,
+			Kind:        fileKind(ext),
 			MIMEType:    mimeType,
 			Size:        info.Size(),
 			CreatedDate: info.ModTime(),
@@ -655,17 +853,16 @@ func rollbackUploadedFiles(files []File) {
 	}
 }
 
-func isUploadTooLarge(err error) bool {
-	var maxBytesError *http.MaxBytesError
-
-	return errors.As(err, &maxBytesError) ||
-		errors.Is(err, multipart.ErrMessageTooLarge) ||
-		errors.Is(err, errFileTooLarge)
+// isNoSpace informa se o erro indica falta de espaço (ou cota) no disco.
+func isNoSpace(err error) bool {
+	return errors.Is(err, errInsufficientStorage) ||
+		errors.Is(err, syscall.ENOSPC) ||
+		errors.Is(err, syscall.EDQUOT)
 }
 
 func writeMultipartError(w http.ResponseWriter, err error) {
-	if isUploadTooLarge(err) {
-		http.Error(w, "upload exceeds maximum size", http.StatusRequestEntityTooLarge)
+	if isNoSpace(err) {
+		http.Error(w, "not enough free storage space", http.StatusInsufficientStorage)
 		return
 	}
 
@@ -697,7 +894,7 @@ func fileHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		renderFileCount(w)
+		renderStats(w)
 		return
 	}
 
@@ -739,7 +936,7 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	renderFileCount(w)
+	renderStats(w)
 }
 
 func mediaHandler(w http.ResponseWriter, r *http.Request) {
