@@ -4,105 +4,355 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Gollery</title>
+    <script>
+      // Aplica tema e modo de visualização antes da primeira renderização.
+      (function () {
+        var root = document.documentElement;
+        try {
+          var theme = localStorage.getItem("gollery-theme");
+          if (theme !== "dark" && theme !== "light") {
+            theme = matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+          }
+          root.dataset.theme = theme;
+        } catch (e) {
+          root.dataset.theme = "light";
+        }
+        try {
+          root.dataset.view =
+            localStorage.getItem("gollery-view") === "list" ? "list" : "grid";
+        } catch (e) {
+          root.dataset.view = "grid";
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="/static/styles.css" />
     <link
       rel="stylesheet"
       href="https://unpkg.com/lucide-static@latest/font/lucide.css"
     />
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <script src="/static/app.js" defer></script>
   </head>
   <body>
     <header class="topbar">
-      <div class="logo">Gollery</div>
-      <form
-          class="upload-form"
-          hx-post="/upload"
-          hx-encoding="multipart/form-data"
-          hx-target="#file-list"
-          hx-swap="innerHTML"
-      >
-        <input
-          id="file-input"
-          type="file"
-          name="Files"
-          multiple
-          hidden
-          onchange="htmx.trigger(this.form, 'submit')"
-        />
+      <a class="logo" href="/">Gollery</a>
 
-        <label for="file-input" class="upload-button">
-          <i class="icon-upload"></i>
-        </label>
-      </form>
+      <div class="topbar-actions">
+        <button
+          id="theme-toggle"
+          class="icon-button"
+          type="button"
+          title="Alternar tema"
+          aria-label="Alternar tema claro/escuro"
+        >
+          <i class="icon-moon theme-icon-dark"></i>
+          <i class="icon-sun theme-icon-light"></i>
+        </button>
+
+        <div class="upload-form">
+          <input id="file-input" type="file" name="Files" multiple hidden />
+
+          <label
+            for="file-input"
+            class="icon-button upload-button"
+            title="Enviar arquivos para esta pasta"
+          >
+            <i class="icon-upload"></i>
+          </label>
+        </div>
+      </div>
     </header>
 
     <main class="content">
-      <div class="gallery-header">
-        <h1>Sua biblioteca</h1>
-          <span id="file-count" hx-swap-oob="true" >{{ len .Files }} arquivos</span>
-      </div>
+      {{ template "storage-stats" .Stats }}
 
-      {{ define "file-count" }}
-        <span id="file-count" hx-swap-oob="true" >{{ . }} arquivos</span>
-      {{ end }}
-
-      <div id="file-list" class="gallery">
-        {{ range .Files }}
-          {{ template "file-card" . }}
+      <nav class="breadcrumb" aria-label="Caminho">
+        {{ if .Crumbs }}
+        <a href="/">Início</a>
+        {{ range .Crumbs }}
+        <i class="icon-chevron-right"></i>
+        {{ if .Current }}<span class="crumb-current">{{ .Name }}</span>{{ else }}<a href="/?path={{ .Path }}">{{ .Name }}</a>{{ end }}
         {{ end }}
+        {{ else }}
+        <span class="crumb-current">Início</span>
+        {{ end }}
+      </nav>
+
+      <div class="gallery-header">
+        <div class="title-group">
+          <h1>Sua biblioteca</h1>
+          {{ template "file-count" .Count }}
+        </div>
+
+        <button id="new-folder" class="btn" type="button">
+          <i class="icon-folder-plus"></i> Nova pasta
+        </button>
       </div>
 
-      {{ define "file-card" }}
+      <form
+        id="sort-form"
+        class="toolbar"
+        hx-get="/files"
+        hx-target="#file-list"
+        hx-swap="innerHTML"
+        hx-trigger="change, refresh"
+        hx-sync="this:replace"
+      >
+        <input id="path-input" type="hidden" name="path" value="{{ .Path }}" />
 
-        <div class="file-card">
-        <a href="/media/{{ .ServerName }}" target="_blank">
-          {{ if or (eq .Ext ".mp4") (eq .Ext ".webm") (eq .Ext ".ogg") (eq
-          .Ext ".mov") (eq .Ext ".mkv") }}
-          <video muted preload="metadata" src="/media/{{ .ServerName }}"></video>
+        <div class="search-box">
+          <i class="icon-search"></i>
+          <input
+            id="search-input"
+            type="search"
+            name="q"
+            value="{{ .Query }}"
+            placeholder="Pesquisar arquivos e pastas"
+            aria-label="Pesquisar arquivos e pastas"
+            autocomplete="off"
+          />
+        </div>
 
-          {{ else if or (eq .Ext ".jpg") (eq .Ext ".jpeg") (eq .Ext ".png")
-          (eq .Ext ".gif") (eq .Ext ".webp") (eq .Ext ".bmp") (eq .Ext ".svg")
-          }}
-          <img loading="lazy" src="/media/{{ .ServerName }}" alt="{{ .Name }}" />
+        <div class="toolbar-right">
+          <label class="sort-label" for="sort-select">Ordenar por</label>
+          <select id="sort-select" name="sort">
+            <option value="date" {{ if eq .Sort "date" }}selected{{ end }}>Data</option>
+            <option value="name" {{ if eq .Sort "name" }}selected{{ end }}>Nome</option>
+            <option value="type" {{ if eq .Sort "type" }}selected{{ end }}>Tipo de arquivo</option>
+          </select>
 
-
-          {{ else }}
-          <div class="file-card-not-media">
-            {{ .Ext }}
-          </div>
-          {{ end }}
-        </a>
-
-        <div class="card-footer">
-          <div class="file-info">
-            {{ if or (eq .Ext ".mp4") (eq .Ext ".webm") (eq .Ext ".ogg") (eq
-            .Ext ".mov") (eq .Ext ".mkv") }}
-            <i class="icon-video"></i>
-
-            {{ else if or (eq .Ext ".jpg") (eq .Ext ".jpeg") (eq .Ext ".png")
-            (eq .Ext ".gif") (eq .Ext ".webp") (eq .Ext ".bmp") (eq .Ext
-            ".svg") }}
-            <i class="icon-image"></i>
-
-            {{ else }}
-            <i class="icon-photo"></i>
-            {{ end }}
-
-            <span class="file-name" title="{{ .Name }}">{{ .Name }}</span>
-          </div>
+          <input id="order-input" type="hidden" name="order" value="{{ .Order }}" />
 
           <button
-                  class="delete-button"
-                  hx-delete="/delete?file={{ .ServerName }}"
-                  hx-target="closest .file-card"
-                  hx-swap="delete"
+            id="order-toggle"
+            class="icon-button small"
+            type="button"
+            data-order="{{ .Order }}"
+            title="Inverter ordem"
+            aria-label="Inverter ordem"
           >
-            <i class="icon-trash"></i>
+            <i class="icon-arrow-up order-icon-asc"></i>
+            <i class="icon-arrow-down order-icon-desc"></i>
           </button>
-        </div>
-      </div>
-      {{ end }}
 
+          <div class="view-toggle" role="group" aria-label="Modo de visualização">
+            <button type="button" data-view="grid" title="Grade" aria-label="Visualizar em grade">
+              <i class="icon-layout-grid"></i>
+            </button>
+            <button type="button" data-view="list" title="Lista" aria-label="Visualizar em lista">
+              <i class="icon-list"></i>
+            </button>
+          </div>
+        </div>
+      </form>
+
+      <div id="file-list" class="gallery">
+        {{ range .Folders }}{{ template "folder-card" . }}{{ end }}
+        {{ range .Files }}{{ template "file-card" . }}{{ end }}
+        {{ if and (not .Folders) (not .Files) }}{{ template "empty-state" .Query }}{{ end }}
+      </div>
     </main>
+
+    <!-- Área de soltar arquivos -->
+    <div id="drop-overlay" class="drop-overlay" hidden>
+      <div>Solte os arquivos para enviar para esta pasta</div>
+    </div>
+
+    <!-- Painel de progresso do upload -->
+    <div
+      id="upload-panel"
+      class="upload-panel"
+      role="status"
+      aria-live="polite"
+      hidden
+    >
+      <div class="upload-panel-head">
+        <strong id="upload-title">Enviando…</strong>
+        <button id="upload-cancel" class="link-button" type="button">
+          Cancelar
+        </button>
+      </div>
+
+      <div class="upload-row">
+        <span id="upload-filename" class="upload-filename"></span>
+        <span id="upload-file-pct">0%</span>
+      </div>
+      <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+        <div id="upload-file-bar" class="bar-fill"></div>
+      </div>
+
+      <div class="upload-row upload-row-total">
+        <span id="upload-total-text"></span>
+        <span id="upload-total-pct">0%</span>
+      </div>
+      <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+        <div id="upload-total-bar" class="bar-fill"></div>
+      </div>
+    </div>
+
+    <!-- Upload concluído -->
+    <dialog id="upload-done" class="modal">
+      <form method="dialog">
+        <h2 id="done-title">Upload concluído</h2>
+        <p id="done-text"></p>
+        <ul id="done-errors" class="error-list" hidden></ul>
+        <div class="modal-actions">
+          <button class="btn btn-primary" value="ok" autofocus>OK</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Confirmação de exclusão -->
+    <dialog id="confirm-dialog" class="modal">
+      <form method="dialog">
+        <h2 id="confirm-title">Excluir arquivo?</h2>
+        <p id="confirm-text"></p>
+        <div class="modal-actions">
+          <button class="btn" value="cancel" autofocus>Cancelar</button>
+          <button class="btn btn-danger" value="confirm">Excluir</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Nova pasta -->
+    <dialog id="folder-dialog" class="modal">
+      <form id="folder-form">
+        <h2>Nova pasta</h2>
+        <input
+          id="folder-name"
+          class="text-input"
+          type="text"
+          maxlength="180"
+          placeholder="Nome da pasta"
+          aria-label="Nome da pasta"
+          autocomplete="off"
+        />
+        <p id="folder-error" class="form-error" hidden></p>
+        <div class="modal-actions">
+          <button id="folder-cancel" class="btn" type="button">Cancelar</button>
+          <button class="btn btn-primary" type="submit">Criar</button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>
+
+{{ define "file-count" }}<span id="file-count" class="file-count" hx-swap-oob="true">{{ if .Search }}Resultados: {{ end }}{{ if .Folders }}{{ .Folders }} {{ if eq .Folders 1 }}pasta{{ else }}pastas{{ end }}{{ if .Files }} · {{ end }}{{ end }}{{ if or .Files (not .Folders) }}{{ .Files }} {{ if eq .Files 1 }}arquivo{{ else }}arquivos{{ end }}{{ end }}</span>{{ end }}
+
+{{ define "empty-state" }}<div class="empty-state">{{ if . }}Nenhum resultado para “{{ . }}”.{{ else }}Esta pasta está vazia.<br />Arraste arquivos para cá ou use o botão de envio.{{ end }}</div>{{ end }}
+
+{{ define "storage-stats" }}
+<section id="storage-stats" class="storage" hx-swap-oob="true" aria-label="Armazenamento">
+  <div class="storage-head">
+    <span class="storage-title"><i class="icon-hard-drive"></i> Armazenamento</span>
+    <span class="storage-numbers">
+      {{ formatBytes .UsedBytes }} na galeria{{ if .HasDisk }} · {{ formatBytes .DiskFree }} livres de {{ formatBytes .DiskTotal }}{{ end }}
+    </span>
+  </div>
+  {{ if .HasDisk }}
+  <div class="storage-bar" role="img" aria-label="Uso do disco">
+    <div class="storage-seg storage-gallery" style="width: {{ .GalleryPct }}%"></div>
+    <div class="storage-seg storage-other" style="width: {{ .OtherPct }}%"></div>
+  </div>
+  <div class="storage-legend">
+    <span><i class="dot dot-gallery"></i>Gollery</span>
+    <span><i class="dot dot-other"></i>Outros</span>
+    <span><i class="dot dot-free"></i>Livre</span>
+  </div>
+  {{ end }}
+</section>
+{{ end }}
+
+{{ define "folder-card" }}
+<div class="file-card folder-card">
+  <a class="folder-link" href="/?path={{ .Path }}" title="{{ .Name }}">
+    <i class="icon-folder folder-icon"></i>
+    <span class="file-name-wrap">
+      <span class="file-name">{{ .Name }}</span>
+      {{ if .Located }}<span class="file-location">{{ .Location }}</span>{{ end }}
+    </span>
+  </a>
+
+  <div class="card-actions">
+    <button
+      class="card-action delete-button"
+      type="button"
+      title="Excluir pasta"
+      aria-label="Excluir pasta {{ .Name }}"
+      data-name="{{ .Name }}"
+      data-kind="folder"
+      hx-delete="/delete?folder={{ .Path | urlquery }}"
+      hx-include="#sort-form"
+      hx-confirm="Excluir esta pasta?"
+      hx-target="closest .file-card"
+      hx-swap="delete"
+    >
+      <i class="icon-trash"></i>
+    </button>
+  </div>
+</div>
+{{ end }}
+
+{{ define "file-card" }}
+<div class="file-card">
+  <a class="file-thumb" href="{{ .URL }}" target="_blank" rel="noopener">
+    {{ if eq .Kind "video" }}
+    <video muted preload="metadata" src="{{ .URL }}"></video>
+    {{ else if eq .Kind "image" }}
+    <img loading="lazy" src="{{ .URL }}" alt="{{ .Name }}" />
+    {{ else }}
+    <div class="file-card-not-media">{{ .Ext }}</div>
+    {{ end }}
+  </a>
+
+  <div class="card-footer">
+    <div class="file-info">
+      {{ if eq .Kind "video" }}
+      <i class="icon-video"></i>
+      {{ else if eq .Kind "image" }}
+      <i class="icon-image"></i>
+      {{ else }}
+      <i class="icon-file"></i>
+      {{ end }}
+
+      <span class="file-name-wrap">
+        <span class="file-name" title="{{ .Name }}">{{ .Name }}</span>
+        {{ if .Located }}<span class="file-location">{{ .Location }}</span>{{ end }}
+      </span>
+    </div>
+
+    <span class="file-size">{{ .SizeLabel }}</span>
+    <span class="file-date">{{ .DateLabel }}</span>
+
+    <div class="card-actions">
+      <a
+        class="card-action"
+        href="{{ .URL }}?download=1"
+        download="{{ .Name }}"
+        title="Baixar"
+        aria-label="Baixar {{ .Name }}"
+      >
+        <i class="icon-download"></i>
+      </a>
+
+      <button
+        class="card-action delete-button"
+        type="button"
+        title="Excluir"
+        aria-label="Excluir {{ .Name }}"
+        data-name="{{ .Name }}"
+        data-kind="file"
+        hx-delete="/delete?file={{ .Path | urlquery }}"
+        hx-include="#sort-form"
+        hx-confirm="Excluir este arquivo?"
+        hx-target="closest .file-card"
+        hx-swap="delete"
+      >
+        <i class="icon-trash"></i>
+      </button>
+    </div>
+  </div>
+</div>
+{{ end }}
