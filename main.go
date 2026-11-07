@@ -204,7 +204,7 @@ func main() {
 	mux.HandleFunc("/", homeHandler)
 
 	server := &http.Server{
-		Addr:              ":8080",
+		Addr:              ":8092",
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
