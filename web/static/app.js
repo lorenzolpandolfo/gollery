@@ -37,6 +37,10 @@
     return n === 1 ? one : many;
   }
 
+  function currentPath() {
+    return $("path-input").value;
+  }
+
   /* ---------------- Tema ---------------- */
 
   $("theme-toggle").addEventListener("click", function () {
@@ -45,12 +49,37 @@
     safeSet("gollery-theme", next);
   });
 
-  /* ---------------- Ordenação ---------------- */
+  /* ---------------- Grade / lista ---------------- */
+
+  var viewButtons = document.querySelectorAll(".view-toggle button");
+
+  function syncViewButtons() {
+    Array.prototype.forEach.call(viewButtons, function (button) {
+      button.setAttribute(
+        "aria-pressed",
+        String(button.dataset.view === root.dataset.view)
+      );
+    });
+  }
+
+  Array.prototype.forEach.call(viewButtons, function (button) {
+    button.addEventListener("click", function () {
+      root.dataset.view = button.dataset.view;
+      safeSet("gollery-view", button.dataset.view);
+      syncViewButtons();
+    });
+  });
+
+  syncViewButtons();
+
+  /* ---------------- Ordenação e pesquisa ---------------- */
 
   var sortForm = $("sort-form");
   var sortSelect = $("sort-select");
   var orderInput = $("order-input");
   var orderToggle = $("order-toggle");
+  var searchInput = $("search-input");
+  var searchTimer = null;
 
   function refreshList() {
     if (window.htmx) htmx.trigger(sortForm, "refresh");
@@ -65,10 +94,16 @@
   }
 
   function saveSort() {
-    safeSet(
-      "gollery-sort",
-      JSON.stringify({ by: sortSelect.value, order: orderInput.value })
-    );
+    var by = sortSelect.value;
+    var order = orderInput.value;
+
+    safeSet("gollery-sort", JSON.stringify({ by: by, order: order }));
+
+    // O servidor usa este cookie para já renderizar a página ordenada.
+    try {
+      document.cookie =
+        "gollery_sort=" + by + "." + order + "; path=/; max-age=31536000; SameSite=Lax";
+    } catch (e) {}
   }
 
   sortSelect.addEventListener("change", saveSort);
@@ -80,10 +115,27 @@
     refreshList();
   });
 
+  // Pesquisa enquanto digita (com debounce). O "change" do campo é bloqueado
+  // para não disparar uma segunda requisição ao sair do campo.
+  searchInput.addEventListener("input", function () {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(refreshList, 300);
+  });
+
+  searchInput.addEventListener("change", function (e) {
+    e.stopPropagation();
+  });
+
+  sortForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    clearTimeout(searchTimer);
+    refreshList();
+  });
+
   syncOrderUI();
 
   document.addEventListener("DOMContentLoaded", function () {
-    // Restaura a ordenação salva (o servidor renderiza com o padrão).
+    // Restaura a ordenação salva caso o servidor tenha renderizado outra.
     var saved;
     try {
       saved = JSON.parse(safeGet("gollery-sort"));
@@ -102,6 +154,7 @@
     sortSelect.value = saved.by;
     orderInput.value = saved.order;
     syncOrderUI();
+    saveSort();
 
     // Dá tempo ao HTMX de processar a página antes de disparar a requisição.
     setTimeout(refreshList, 0);
@@ -117,15 +170,23 @@
 
   var confirmDialog = $("confirm-dialog");
   var doneDialog = $("upload-done");
+  var folderDialog = $("folder-dialog");
 
   closeOnBackdrop(confirmDialog);
   closeOnBackdrop(doneDialog);
+  closeOnBackdrop(folderDialog);
 
-  function confirmDeletion(name) {
+  function confirmDeletion(name, isFolder) {
     return new Promise(function (resolve) {
-      $("confirm-text").textContent = name
-        ? "“" + name + "” será excluído permanentemente. Essa ação não pode ser desfeita."
-        : "Esse arquivo será excluído permanentemente. Essa ação não pode ser desfeita.";
+      $("confirm-title").textContent = isFolder
+        ? "Excluir pasta?"
+        : "Excluir arquivo?";
+
+      var subject = name ? "“" + name + "”" : isFolder ? "Essa pasta" : "Esse arquivo";
+
+      $("confirm-text").textContent = isFolder
+        ? subject + " e tudo o que está dentro dela serão excluídos permanentemente. Essa ação não pode ser desfeita."
+        : subject + " será excluído permanentemente. Essa ação não pode ser desfeita.";
 
       confirmDialog.returnValue = "";
       confirmDialog.addEventListener(
@@ -145,11 +206,71 @@
 
     e.preventDefault();
 
-    var name = e.detail.elt && e.detail.elt.dataset.name;
+    var elt = e.detail.elt;
+    var name = elt && elt.dataset.name;
+    var isFolder = !!elt && elt.dataset.kind === "folder";
 
-    confirmDeletion(name).then(function (confirmed) {
+    confirmDeletion(name, isFolder).then(function (confirmed) {
       if (confirmed) e.detail.issueRequest(true);
     });
+  });
+
+  /* ---------------- Nova pasta ---------------- */
+
+  var folderForm = $("folder-form");
+  var folderName = $("folder-name");
+  var folderError = $("folder-error");
+
+  function showFolderError(message) {
+    folderError.textContent = message;
+    folderError.hidden = false;
+  }
+
+  $("new-folder").addEventListener("click", function () {
+    folderName.value = "";
+    folderError.hidden = true;
+    folderDialog.showModal();
+    folderName.focus();
+  });
+
+  $("folder-cancel").addEventListener("click", function () {
+    folderDialog.close();
+  });
+
+  folderForm.addEventListener("submit", async function (e) {
+    e.preventDefault();
+
+    var name = folderName.value.trim();
+
+    if (!name) {
+      showFolderError("Digite um nome para a pasta.");
+      return;
+    }
+
+    try {
+      var response = await fetch("/folders", {
+        method: "POST",
+        body: new URLSearchParams({ path: currentPath(), name: name }),
+      });
+
+      if (response.ok) {
+        folderDialog.close();
+        refreshList();
+        return;
+      }
+
+      if (response.status === 409) {
+        showFolderError("Já existe uma pasta com esse nome aqui.");
+      } else if (response.status === 400) {
+        showFolderError("Nome inválido. Não use / ou \\ e não comece com ponto.");
+      } else if (response.status === 507) {
+        showFolderError("Sem espaço suficiente no servidor.");
+      } else {
+        showFolderError("Não foi possível criar a pasta.");
+      }
+    } catch (err) {
+      showFolderError("Falha de conexão.");
+    }
   });
 
   /* ---------------- Upload ---------------- */
@@ -183,16 +304,17 @@
 
   function errorMessage(xhr) {
     if (xhr.status === 507) return "sem espaço suficiente no servidor";
+    if (xhr.status === 404) return "a pasta de destino não existe mais";
     var text = (xhr.responseText || "").trim();
     return text || "erro " + xhr.status;
   }
 
-  function sendFile(file, onProgress) {
+  function sendFile(file, destination, onProgress) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
       currentXhr = xhr;
 
-      xhr.open("POST", "/upload");
+      xhr.open("POST", "/upload?path=" + encodeURIComponent(destination));
 
       xhr.upload.onprogress = function (e) {
         if (!e.lengthComputable || e.total === 0) return;
@@ -272,6 +394,9 @@
     cancelled = false;
     fileInput.disabled = true;
 
+    // A pasta de destino é fixada no início, mesmo que a pesquisa mude depois.
+    var destination = currentPath();
+
     var total = files.reduce(function (sum, f) {
       return sum + f.size;
     }, 0);
@@ -299,7 +424,7 @@
       setBar(uploadFileBar, uploadFilePct, 0, file.size);
 
       try {
-        await sendFile(file, function (loaded) {
+        await sendFile(file, destination, function (loaded) {
           setBar(uploadFileBar, uploadFilePct, loaded, file.size);
           updateTotal(loaded);
         });
@@ -347,5 +472,69 @@
       e.preventDefault();
       e.returnValue = "";
     }
+  });
+
+  /* ---------------- Arrastar e soltar ---------------- */
+
+  var dropOverlay = $("drop-overlay");
+  var dragDepth = 0;
+
+  function hasFiles(e) {
+    return (
+      !!e.dataTransfer &&
+      Array.prototype.indexOf.call(e.dataTransfer.types || [], "Files") !== -1
+    );
+  }
+
+  function droppedFiles(dataTransfer) {
+    var files = [];
+    var items = dataTransfer.items;
+
+    if (items && items.length) {
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        if (item.kind !== "file") continue;
+
+        // Pastas arrastadas são ignoradas; só arquivos são enviados.
+        var entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+        if (entry && !entry.isFile) continue;
+
+        var file = item.getAsFile();
+        if (file) files.push(file);
+      }
+      return files;
+    }
+
+    return Array.prototype.slice.call(dataTransfer.files);
+  }
+
+  window.addEventListener("dragenter", function (e) {
+    if (!hasFiles(e) || uploading) return;
+    e.preventDefault();
+    dragDepth++;
+    dropOverlay.hidden = false;
+  });
+
+  window.addEventListener("dragover", function (e) {
+    if (hasFiles(e)) e.preventDefault();
+  });
+
+  window.addEventListener("dragleave", function (e) {
+    if (!hasFiles(e)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) dropOverlay.hidden = true;
+  });
+
+  window.addEventListener("drop", function (e) {
+    if (!hasFiles(e)) return;
+
+    e.preventDefault();
+    dragDepth = 0;
+    dropOverlay.hidden = true;
+
+    if (uploading) return;
+
+    var files = droppedFiles(e.dataTransfer);
+    if (files.length > 0) startUpload(files);
   });
 })();
