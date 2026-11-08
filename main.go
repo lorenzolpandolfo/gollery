@@ -1,11 +1,13 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -126,6 +128,7 @@ type Crumb struct {
 
 // StorageStats resume o uso de armazenamento da biblioteca e do disco.
 type StorageStats struct {
+	Hostname   string
 	FileCount  int
 	UsedBytes  int64 // soma do tamanho de todos os arquivos
 	HasDisk    bool
@@ -198,6 +201,9 @@ func main() {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/upload", uploadHandler)
 	mux.HandleFunc("/delete", deleteHandler)
+	mux.HandleFunc("/bulk-delete", bulkDeleteHandler)
+	mux.HandleFunc("/bulk-download", bulkDownloadHandler)
+	mux.HandleFunc("/bulk-move", bulkMoveHandler)
 	mux.HandleFunc("/folders", foldersHandler)
 	mux.HandleFunc("/files", filesHandler)
 	mux.HandleFunc("/files/", fileHandler)
@@ -867,6 +873,13 @@ func buildStats() StorageStats {
 	used, count := librarySize()
 
 	stats := StorageStats{FileCount: count, UsedBytes: used}
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		log.Printf("hostname lookup error: %v", err)
+	} else {
+		stats.Hostname = hostname
+	}
 
 	total, free, ok := diskUsage(mediaDirectory)
 
@@ -1571,6 +1584,320 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	invalidateStats()
 	renderOOBOnly(w, r)
+}
+
+// BulkDeleteRequest representa uma requisição de exclusão em lote.
+type BulkDeleteRequest struct {
+	Items []BulkItem `json:"items"`
+}
+
+// BulkItem representa um item (arquivo ou pasta) para operações em lote.
+type BulkItem struct {
+	Kind string `json:"kind"` // "file" ou "folder"
+	Path string `json:"path"`
+}
+
+// bulkDeleteHandler remove múltiplos arquivos e/ou pastas em uma única requisição.
+func bulkDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	var req BulkDeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Items) == 0 {
+		http.Error(w, "no items provided", http.StatusBadRequest)
+		return
+	}
+
+	var firstErr error
+	for _, item := range req.Items {
+		var err error
+		switch item.Kind {
+		case "file":
+			err = removeFileByReference(item.Path)
+		case "folder":
+			err = removeFolder(item.Path)
+		default:
+			err = fmt.Errorf("invalid item kind: %s", item.Kind)
+		}
+
+		if err != nil && firstErr == nil {
+			firstErr = err
+			log.Printf("bulk delete error for %s:%s: %v", item.Kind, item.Path, err)
+		}
+	}
+
+	if firstErr != nil {
+		if errors.Is(firstErr, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "unable to delete some items", http.StatusInternalServerError)
+		return
+	}
+
+	invalidateStats()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// BulkDownloadRequest representa uma requisição de download em lote.
+type BulkDownloadRequest struct {
+	Items []BulkItem `json:"items"`
+}
+
+// bulkDownloadHandler cria um arquivo ZIP com os itens selecionados.
+func bulkDownloadHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	var req BulkDownloadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Items) == 0 {
+		http.Error(w, "no items provided", http.StatusBadRequest)
+		return
+	}
+
+	// Define headers para download do ZIP
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="gollery-selecao.zip"`)
+
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+
+	// Buffer para copiar arquivos
+	buf := make([]byte, 32*1024)
+
+	for _, item := range req.Items {
+		switch item.Kind {
+		case "file":
+			file, err := findFileByReference(item.Path)
+			if err != nil {
+				log.Printf("bulk download: file not found %s: %v", item.Path, err)
+				continue
+			}
+			if err := addFileToZip(zw, file, buf); err != nil {
+				log.Printf("bulk download: error adding file %s: %v", file.Name, err)
+			}
+		case "folder":
+			if err := addFolderToZip(zw, item.Path, buf); err != nil {
+				log.Printf("bulk download: error adding folder %s: %v", item.Path, err)
+			}
+		}
+	}
+}
+
+// addFileToZip adiciona um único arquivo ao ZIP.
+func addFileToZip(zw *zip.Writer, file File, buf []byte) error {
+	src, err := os.Open(fullPath(file.Path))
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	info, err := src.Stat()
+	if err != nil {
+		return err
+	}
+
+	header, err := zip.FileInfoHeader(info)
+	if err != nil {
+		return err
+	}
+	header.Name = file.Name
+	header.Method = zip.Deflate
+
+	entry, err := zw.CreateHeader(header)
+	if err != nil {
+		return err
+	}
+
+	_, err = io.CopyBuffer(entry, src, buf)
+	return err
+}
+
+// addFolderToZip adiciona uma pasta (recursivamente) ao ZIP.
+func addFolderToZip(zw *zip.Writer, relPath string, buf []byte) error {
+	full := fullPath(relPath)
+
+	return filepath.WalkDir(full, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Pula a própria pasta raiz
+		if path == full {
+			return nil
+		}
+
+		// Obtém o caminho relativo dentro da pasta
+		rel, err := filepath.Rel(full, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+
+		if entry.IsDir() {
+			// Adiciona entrada de diretório
+			header, err := zip.FileInfoHeader(info)
+			if err != nil {
+				return err
+			}
+			header.Name = rel + "/"
+			header.Method = zip.Store
+			_, err = zw.CreateHeader(header)
+			return err
+		}
+
+		// Para arquivos, tenta obter o nome original (sem UUID)
+		name := entry.Name()
+		_, originalName, ok := parseStoredFilename(name)
+		if !ok {
+			originalName = name
+		}
+
+		src, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = originalName
+		header.Method = zip.Deflate
+
+		zipEntry, err := zw.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+
+		_, err = io.CopyBuffer(zipEntry, src, buf)
+		return err
+	})
+}
+
+// BulkMoveRequest representa uma requisição de mover itens em lote.
+type BulkMoveRequest struct {
+	Items      []BulkItem `json:"items"`
+	TargetPath string     `json:"targetPath"`
+}
+
+// bulkMoveHandler move múltiplos arquivos e/ou pastas para uma pasta de destino.
+func bulkMoveHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	var req BulkMoveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Items) == 0 {
+		http.Error(w, "no items provided", http.StatusBadRequest)
+		return
+	}
+
+	// Valida se o destino existe e é uma pasta
+	if !dirExists(req.TargetPath) {
+		http.NotFound(w, r)
+		return
+	}
+
+	var firstErr error
+	for _, item := range req.Items {
+		var err error
+		switch item.Kind {
+		case "file":
+			err = moveFile(item.Path, req.TargetPath)
+		case "folder":
+			err = moveFolder(item.Path, req.TargetPath)
+		default:
+			err = fmt.Errorf("invalid item kind: %s", item.Kind)
+		}
+
+		if err != nil && firstErr == nil {
+			firstErr = err
+			log.Printf("bulk move error for %s:%s: %v", item.Kind, item.Path, err)
+		}
+	}
+
+	if firstErr != nil {
+		if errors.Is(firstErr, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
+		if errors.Is(firstErr, os.ErrExist) {
+			http.Error(w, "item already exists in destination", http.StatusConflict)
+			return
+		}
+		http.Error(w, "unable to move some items", http.StatusInternalServerError)
+		return
+	}
+
+	invalidateStats()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// moveFile move um arquivo para uma pasta de destino.
+func moveFile(filePath, targetDir string) error {
+	file, err := findFileByReference(filePath)
+	if err != nil {
+		return err
+	}
+
+	// Constrói o novo caminho mantendo o nome do servidor (com UUID)
+	newPath := joinRel(targetDir, file.ServerName)
+
+	// Verifica se já existe
+	if _, err := os.Lstat(fullPath(newPath)); err == nil {
+		return os.ErrExist
+	}
+
+	// Move o arquivo (os.Rename funciona dentro do mesmo filesystem)
+	return os.Rename(fullPath(file.Path), fullPath(newPath))
+}
+
+// moveFolder move uma pasta (recursivamente) para uma pasta de destino.
+func moveFolder(folderPath, targetDir string) error {
+	rel, ok := cleanRelPath(folderPath)
+	if !ok || rel == "" {
+		return os.ErrNotExist
+	}
+
+	// Não pode mover para si mesmo ou para um subdiretório
+	if rel == targetDir || strings.HasPrefix(targetDir, rel+"/") {
+		return errors.New("cannot move folder into itself")
+	}
+
+	src := fullPath(rel)
+	dst := fullPath(joinRel(targetDir, filepath.Base(rel)))
+
+	// Verifica se destino já existe
+	if _, err := os.Lstat(dst); err == nil {
+		return os.ErrExist
+	}
+
+	// Move a pasta
+	return os.Rename(src, dst)
 }
 
 func mediaHandler(w http.ResponseWriter, r *http.Request) {

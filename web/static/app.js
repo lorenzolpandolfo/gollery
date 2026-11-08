@@ -537,4 +537,625 @@
     var files = droppedFiles(e.dataTransfer);
     if (files.length > 0) startUpload(files);
   });
+
+  /* ---------------- Seleção múltipla / Ações em lote ---------------- */
+
+  var bulkToolbar = $("bulk-toolbar");
+  var bulkCount = $("bulk-count");
+  var bulkDownloadBtn = $("bulk-download");
+  var bulkDeleteBtn = $("bulk-delete");
+  var bulkCancelBtn = $("bulk-cancel");
+  var fileList = $("file-list");
+
+  var selectedItems = new Set();
+
+  function getItemKey(itemEl) {
+    var path = itemEl.dataset.path;
+    var kind = itemEl.dataset.kind;
+    return kind + ":" + path;
+  }
+
+  function updateBulkToolbar() {
+    var count = selectedItems.size;
+    if (count > 0) {
+      bulkCount.textContent = count + " " + plural(count, "item selecionado", "itens selecionados");
+      bulkToolbar.hidden = false;
+    } else {
+      bulkToolbar.hidden = true;
+    }
+  }
+
+  function updateItemSelection(itemEl, selected) {
+    var card = itemEl.closest(".file-card");
+    if (card) {
+      card.classList.toggle("selected", selected);
+    }
+  }
+
+  function selectItem(itemEl) {
+    var key = getItemKey(itemEl);
+    if (!selectedItems.has(key)) {
+      selectedItems.add(key);
+      itemEl.checked = true;
+      updateItemSelection(itemEl, true);
+    }
+  }
+
+  function deselectItem(itemEl) {
+    var key = getItemKey(itemEl);
+    if (selectedItems.has(key)) {
+      selectedItems.delete(key);
+      itemEl.checked = false;
+      updateItemSelection(itemEl, false);
+    }
+  }
+
+  function toggleItem(itemEl) {
+    if (itemEl.checked) {
+      selectItem(itemEl);
+    } else {
+      deselectItem(itemEl);
+    }
+    updateBulkToolbar();
+  }
+
+  function clearSelection() {
+    selectedItems.forEach(function (key) {
+      var parts = key.split(":");
+      var kind = parts[0];
+      var path = parts.slice(1).join(":");
+      var checkbox = document.querySelector('.select-item[data-kind="' + kind + '"][data-path="' + path + '"]');
+      if (checkbox) {
+        checkbox.checked = false;
+        updateItemSelection(checkbox, false);
+      }
+    });
+    selectedItems.clear();
+    updateBulkToolbar();
+  }
+
+  function getSelectedItems() {
+    var items = [];
+    selectedItems.forEach(function (key) {
+      var parts = key.split(":");
+      var kind = parts[0];
+      var path = parts.slice(1).join(":");
+      items.push({ kind: kind, path: path });
+    });
+    return items;
+  }
+
+  // Delegação de eventos para checkboxes
+  fileList.addEventListener("change", function (e) {
+    if (e.target.matches(".select-item")) {
+      toggleItem(e.target);
+    }
+  });
+
+  // Seleção via clique no card (Shift+click para seleção em intervalo)
+  var lastSelectedCard = null;
+  fileList.addEventListener("click", function (e) {
+    var card = e.target.closest(".file-card");
+    if (!card) return;
+
+    if (longPressedCard === card) {
+      e.preventDefault();
+      longPressedCard = null;
+      clearTimeout(longPressClickTimer);
+      return;
+    }
+
+    var checkbox = card.querySelector(".select-item");
+    if (!checkbox) return;
+
+    if (e.target === checkbox || e.target.closest("button") || e.target.closest("label")) return;
+
+    var clickedLink = e.target.closest("a");
+    var mobileSelection = window.matchMedia("(max-width: 768px)").matches && selectedItems.size > 0;
+    if (clickedLink && !mobileSelection) return;
+    if (clickedLink) e.preventDefault();
+
+    if (e.shiftKey && lastSelectedCard) {
+      // Seleção em intervalo
+      var cards = Array.prototype.slice.call(fileList.querySelectorAll(".file-card"));
+      var start = cards.indexOf(lastSelectedCard);
+      var end = cards.indexOf(card);
+      if (start > end) { var tmp = start; start = end; end = tmp; }
+      for (var i = start; i <= end; i++) {
+        var cb = cards[i].querySelector(".select-item");
+        if (cb && !cb.checked) selectItem(cb);
+      }
+      updateBulkToolbar();
+    } else {
+      // Toggle simples
+      checkbox.checked = !checkbox.checked;
+      toggleItem(checkbox);
+    }
+    lastSelectedCard = card;
+  });
+
+  bulkCancelBtn.addEventListener("click", clearSelection);
+
+  // Download em lote
+  bulkDownloadBtn.addEventListener("click", async function () {
+    var items = getSelectedItems();
+    if (items.length === 0) return;
+
+    if (items.length === 1) {
+      // Um único item: usa o link direto
+      var item = items[0];
+      var url = "/media/" + encodeURIComponent(item.path) + "?download=1";
+      window.open(url, "_blank");
+      return;
+    }
+
+    // Múltiplos itens: solicita ZIP ao servidor
+    bulkDownloadBtn.disabled = true;
+    bulkDownloadBtn.textContent = " Preparando...";
+
+    try {
+      var response = await fetch("/bulk-download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: items }),
+      });
+
+      if (response.ok) {
+        var blob = await response.blob();
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "gollery-selecao-" + Date.now() + ".zip";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } else {
+        var err = await response.text();
+        alert("Erro ao criar ZIP: " + (err || response.statusText));
+      }
+    } catch (err) {
+      alert("Falha de conexão: " + err.message);
+    } finally {
+      bulkDownloadBtn.disabled = false;
+      bulkDownloadBtn.innerHTML = '<i class="icon-download"></i> Baixar';
+    }
+  });
+
+  // Exclusão em lote
+  bulkDeleteBtn.addEventListener("click", async function () {
+    var items = getSelectedItems();
+    if (items.length === 0) return;
+
+    var confirmMsg = items.length === 1
+      ? (items[0].kind === "folder" ? "Excluir esta pasta e todo o seu conteúdo?" : "Excluir este arquivo?")
+      : "Excluir " + items.length + " itens selecionados?";
+
+    if (!confirm(confirmMsg + " Esta ação não pode ser desfeita.")) return;
+
+    bulkDeleteBtn.disabled = true;
+    bulkDeleteBtn.textContent = " Excluindo...";
+
+    try {
+      var response = await fetch("/bulk-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: items }),
+      });
+
+      if (response.ok) {
+        clearSelection();
+        refreshList();
+      } else {
+        var err = await response.text();
+        alert("Erro ao excluir: " + (err || response.statusText));
+      }
+    } catch (err) {
+      alert("Falha de conexão: " + err.message);
+    } finally {
+      bulkDeleteBtn.disabled = false;
+      bulkDeleteBtn.innerHTML = '<i class="icon-trash"></i> Excluir';
+    }
+  });
+
+  // Limpa seleção quando a lista é atualizada via HTMX
+  document.body.addEventListener("htmx:afterSwap", function (e) {
+    if (e.detail.target.id === "file-list") {
+      clearSelection();
+    }
+  });
+
+  // Limpa seleção ao navegar (mudança de pasta/pesquisa)
+  sortForm.addEventListener("htmx:beforeRequest", function () {
+    clearSelection();
+  });
+
+  /* ---------------- Mover itens (drag & drop) ---------------- */
+
+  var moveDialog = $("move-dialog");
+  var dragSourceCards = [];
+  var dragOverFolder = null;
+  var breadcrumb = document.querySelector(".breadcrumb");
+  var longPressTimer = null;
+  var longPressThreshold = 500; // ms
+  var isLongPress = false;
+  var longPressedCard = null;
+  var longPressClickTimer = null;
+
+  closeOnBackdrop(moveDialog);
+
+  function isInvalidMoveTarget(items, targetPath) {
+    return items.some(function (item) {
+      return item.kind === "folder" &&
+        (item.path === targetPath || targetPath.startsWith(item.path + "/"));
+    });
+  }
+
+  function confirmMove(itemCount, targetFolderName) {
+    return new Promise(function (resolve) {
+      var title = itemCount === 1 ? "Mover item?" : "Mover " + itemCount + " itens?";
+      var text = "Mover para a pasta “" + targetFolderName + "”?";
+
+      $("move-title").textContent = title;
+      $("move-text").textContent = text;
+
+      moveDialog.returnValue = "";
+      moveDialog.addEventListener(
+        "close",
+        function () {
+          resolve(moveDialog.returnValue === "confirm");
+        },
+        { once: true }
+      );
+      moveDialog.showModal();
+    });
+  }
+
+  // Drag start - inicia arrasto de itens selecionados ou do item atual
+  fileList.addEventListener("dragstart", function (e) {
+    var card = e.target.closest(".file-card");
+    if (!card) return;
+
+    // Não permite arrastar se está arrastando arquivos do sistema (upload)
+    if (uploading) {
+      e.preventDefault();
+      return;
+    }
+
+    var checkbox = card.querySelector(".select-item");
+    if (!checkbox) return;
+
+    // Se tem itens selecionados e o card atual não está selecionado, usa a seleção
+    // Se o card atual está selecionado, usa a seleção
+    // Se não tem nada selecionado, seleciona apenas este card
+    if (selectedItems.size === 0 || (selectedItems.size > 0 && checkbox.checked)) {
+      // Usa itens selecionados
+      dragSourceCards = getSelectedItems();
+    } else {
+      // Seleciona apenas este item para o drag
+      dragSourceCards = [{ kind: checkbox.dataset.kind, path: checkbox.dataset.path }];
+    }
+
+    if (dragSourceCards.length === 0) {
+      e.preventDefault();
+      return;
+    }
+
+    // Define dados do drag
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", JSON.stringify(dragSourceCards));
+
+    // Adiciona classe visual
+    card.classList.add("dragging");
+    dragSourceCards.forEach(function (item) {
+      var selCard = document.querySelector('.select-item[data-kind="' + item.kind + '"][data-path="' + item.path + '"]');
+      if (selCard) selCard.closest(".file-card").classList.add("dragging");
+    });
+  });
+
+  fileList.addEventListener("dragend", function (e) {
+    // Remove classes visuais
+    document.querySelectorAll(".file-card.dragging").forEach(function (c) {
+      c.classList.remove("dragging");
+    });
+    document.querySelectorAll(".file-card.drag-over").forEach(function (c) {
+      c.classList.remove("drag-over");
+    });
+    breadcrumb.querySelectorAll(".drag-over").forEach(function (c) {
+      c.classList.remove("drag-over");
+    });
+    dragSourceCards = [];
+    dragOverFolder = null;
+  });
+
+  // Drag over - apenas pastas podem receber drop
+  fileList.addEventListener("dragover", function (e) {
+    var folderCard = e.target.closest(".folder-card");
+    if (!folderCard) return;
+
+    var checkbox = folderCard.querySelector(".select-item");
+    if (!checkbox || checkbox.dataset.kind !== "folder") return;
+
+    // Não permite soltar na própria pasta ou em subpastas dos itens arrastados
+    var targetPath = checkbox.dataset.path;
+    if (isInvalidMoveTarget(dragSourceCards, targetPath)) {
+      e.dataTransfer.dropEffect = "none";
+      return;
+    }
+
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+
+    // Highlight visual
+    if (dragOverFolder !== folderCard) {
+      document.querySelectorAll(".file-card.drag-over").forEach(function (c) {
+        c.classList.remove("drag-over");
+      });
+      folderCard.classList.add("drag-over");
+      dragOverFolder = folderCard;
+    }
+  });
+
+  fileList.addEventListener("dragleave", function (e) {
+    var folderCard = e.target.closest(".folder-card");
+    if (folderCard && !folderCard.contains(e.relatedTarget)) {
+      folderCard.classList.remove("drag-over");
+      if (dragOverFolder === folderCard) dragOverFolder = null;
+    }
+  });
+
+  // Drop - move itens para a pasta
+  fileList.addEventListener("drop", function (e) {
+    var folderCard = e.target.closest(".folder-card");
+    if (!folderCard) return;
+
+    var checkbox = folderCard.querySelector(".select-item");
+    if (!checkbox || checkbox.dataset.kind !== "folder") return;
+
+    e.preventDefault();
+
+    var targetPath = checkbox.dataset.path;
+    var targetName = checkbox.dataset.name;
+    var itemsToMove = dragSourceCards.slice();
+
+    // Valida se não está tentando mover para si mesmo ou descendentes
+    if (isInvalidMoveTarget(itemsToMove, targetPath)) {
+      folderCard.classList.remove("drag-over");
+      dragOverFolder = null;
+      return;
+    }
+
+    // Confirma a ação
+    confirmMove(itemsToMove.length, targetName).then(function (confirmed) {
+      if (!confirmed) {
+        folderCard.classList.remove("drag-over");
+        dragOverFolder = null;
+        return;
+      }
+
+      // Executa o move
+      moveItems(itemsToMove, targetPath).then(function (success) {
+        folderCard.classList.remove("drag-over");
+        dragOverFolder = null;
+        if (success) {
+          clearSelection();
+          refreshList();
+        }
+      });
+    });
+  });
+
+  breadcrumb.addEventListener("dragover", function (e) {
+    var target = e.target.closest("[data-drop-path]");
+    if (!target || dragSourceCards.length === 0) return;
+
+    var targetPath = target.dataset.dropPath;
+    if (isInvalidMoveTarget(dragSourceCards, targetPath)) {
+      e.dataTransfer.dropEffect = "none";
+      return;
+    }
+
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    target.classList.add("drag-over");
+  });
+
+  breadcrumb.addEventListener("dragleave", function (e) {
+    var target = e.target.closest("[data-drop-path]");
+    if (target && !target.contains(e.relatedTarget)) {
+      target.classList.remove("drag-over");
+    }
+  });
+
+  breadcrumb.addEventListener("drop", function (e) {
+    var target = e.target.closest("[data-drop-path]");
+    if (!target || dragSourceCards.length === 0) return;
+
+    e.preventDefault();
+    var itemsToMove = dragSourceCards.slice();
+    var targetPath = target.dataset.dropPath;
+    var targetName = target.textContent.trim();
+    target.classList.remove("drag-over");
+
+    if (isInvalidMoveTarget(itemsToMove, targetPath)) return;
+
+    confirmMove(itemsToMove.length, targetName).then(function (confirmed) {
+      if (!confirmed) return;
+
+      moveItems(itemsToMove, targetPath).then(function (success) {
+        if (success) {
+          clearSelection();
+          refreshList();
+        }
+      });
+    });
+  });
+
+  async function moveItems(items, targetPath) {
+    try {
+      var response = await fetch("/bulk-move", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: items, targetPath: targetPath }),
+      });
+
+      if (response.ok) {
+        return true;
+      } else {
+        var err = await response.text();
+        alert("Erro ao mover: " + (err || response.statusText));
+        return false;
+      }
+    } catch (err) {
+      alert("Falha de conexão: " + err.message);
+      return false;
+    }
+  }
+
+  /* ---------------- Long press para seleção (mobile) ---------------- */
+
+  fileList.addEventListener("touchstart", function (e) {
+    var card = e.target.closest(".file-card");
+    if (!card) return;
+
+    var checkbox = card.querySelector(".select-item");
+    if (!checkbox) return;
+
+    // Se já está selecionado, não inicia long press
+    if (checkbox.checked) return;
+
+    // Não inicia long press se tocou em checkbox ou botão
+    if (e.target.closest("button") || e.target.closest("label") || e.target === checkbox) return;
+
+    isLongPress = false;
+    longPressTimer = setTimeout(function () {
+      isLongPress = true;
+      checkbox.checked = true;
+      toggleItem(checkbox);
+      longPressedCard = card;
+      clearTimeout(longPressClickTimer);
+      longPressClickTimer = setTimeout(function () {
+        longPressedCard = null;
+      }, 400);
+      // Feedback tátil
+      if (navigator.vibrate) navigator.vibrate(50);
+    }, longPressThreshold);
+  });
+
+  fileList.addEventListener("touchend", function (e) {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+
+    // Se foi long press, impede o click normal
+    if (isLongPress) {
+      isLongPress = false;
+      e.preventDefault();
+    }
+  });
+
+  fileList.addEventListener("touchmove", function (e) {
+    // Cancela long press se moveu o dedo
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+  });
+
+  /* ---------------- Touch drag para mobile (arrastar para mover) ---------------- */
+
+  var touchDragSource = null;
+  var touchDragStartX = 0;
+  var touchDragStartY = 0;
+  var touchDragThreshold = 10; // pixels
+
+  fileList.addEventListener("touchstart", function (e) {
+    if (isLongPress) return; // Não inicia drag se foi long press
+
+    var card = e.target.closest(".file-card");
+    if (!card) return;
+
+    var checkbox = card.querySelector(".select-item");
+    if (!checkbox) return;
+
+    // Não inicia drag se tocou em botão ou checkbox
+    if (e.target.closest("button") || e.target.closest("label") || e.target === checkbox) return;
+
+    touchDragSource = {
+      card: card,
+      checkbox: checkbox,
+      startX: e.touches[0].clientX,
+      startY: e.touches[0].clientY,
+    };
+  }, { passive: true });
+
+  fileList.addEventListener("touchmove", function (e) {
+    if (!touchDragSource) return;
+
+    var deltaX = e.touches[0].clientX - touchDragSource.startX;
+    var deltaY = e.touches[0].clientY - touchDragSource.startY;
+    var distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+
+    if (distance > touchDragThreshold) {
+      // Inicia drag visual
+      touchDragSource.card.classList.add("dragging");
+      e.preventDefault(); // Impede scroll
+    }
+  }, { passive: false });
+
+  fileList.addEventListener("touchend", function (e) {
+    if (!touchDragSource) return;
+
+    var card = touchDragSource.card;
+    var checkbox = touchDragSource.checkbox;
+
+    card.classList.remove("dragging");
+
+    // Verifica se soltou sobre uma pasta ou breadcrumb
+    var touch = e.changedTouches[0];
+    var targetEl = document.elementFromPoint(touch.clientX, touch.clientY);
+    var folderCard = targetEl && targetEl.closest(".folder-card");
+    var crumbTarget = targetEl && targetEl.closest("[data-drop-path]");
+
+    if (folderCard || crumbTarget) {
+      var folderCheckbox = folderCard && folderCard.querySelector(".select-item");
+      if (crumbTarget || (folderCheckbox && folderCheckbox.dataset.kind === "folder")) {
+        var targetPath = crumbTarget ? crumbTarget.dataset.dropPath : folderCheckbox.dataset.path;
+        var targetName = crumbTarget ? crumbTarget.textContent.trim() : folderCheckbox.dataset.name;
+
+        // Determina itens a mover
+        var itemsToMove = selectedItems.size > 0 && checkbox.checked
+          ? getSelectedItems()
+          : [{ kind: checkbox.dataset.kind, path: checkbox.dataset.path }];
+
+        if (!isInvalidMoveTarget(itemsToMove, targetPath)) {
+          confirmMove(itemsToMove.length, targetName).then(function (confirmed) {
+            if (confirmed) {
+              moveItems(itemsToMove, targetPath).then(function (success) {
+                if (success) {
+                  clearSelection();
+                  refreshList();
+                }
+              });
+            }
+          });
+        }
+      }
+    }
+
+    touchDragSource = null;
+  });
+
+  // Cleanup touch drag no cancelamento
+  window.addEventListener("touchcancel", function () {
+    if (touchDragSource) {
+      touchDragSource.card.classList.remove("dragging");
+      touchDragSource = null;
+    }
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+  });
 })();
