@@ -32,4 +32,6 @@ go.work.sum
 # .vscode/i
 
 media/
+data.json
+.data-*.tmp
 gollery

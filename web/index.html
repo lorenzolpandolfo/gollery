@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="pt-BR">
+<html lang="pt-BR" data-page-view="{{ .View }}">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -51,7 +51,7 @@
           <i class="icon-sun theme-icon-light"></i>
         </button>
 
-        <div class="upload-form">
+        <div class="upload-form" {{ if or (eq .View "trash") (eq .View "storage") }}hidden{{ end }}>
           <input id="file-input" type="file" name="Files" multiple hidden />
 
           <label
@@ -65,28 +65,55 @@
       </div>
     </header>
 
+    <nav class="library-nav" aria-label="Navegação da biblioteca">
+      <a class="library-nav-link{{ if eq .View "" }} active{{ end }}" href="/">
+        <i class="icon-folder"></i><span>Arquivos</span>
+      </a>
+      <a class="library-nav-link{{ if eq .View "recent" }} active{{ end }}" href="/?view=recent">
+        <i class="icon-clock"></i><span>Recentes</span>
+      </a>
+      <a class="library-nav-link{{ if eq .View "photos" }} active{{ end }}" href="/?view=photos">
+        <i class="icon-image"></i><span>Fotos</span>
+      </a>
+      <a class="library-nav-link{{ if eq .View "starred" }} active{{ end }}" href="/?view=starred">
+        <i class="icon-star"></i><span>Com estrela</span>
+      </a>
+      <a class="library-nav-link{{ if eq .View "trash" }} active{{ end }}" href="/?view=trash">
+        <i class="icon-trash"></i><span>Lixeira</span>
+      </a>
+      <a class="library-nav-link{{ if eq .View "storage" }} active{{ end }}" href="/?view=storage">
+        <i class="icon-hard-drive"></i><span>Armazenamento</span>
+      </a>
+    </nav>
+
     <main class="content">
+      {{ if eq .View "storage" }}
       {{ template "storage-stats" .Stats }}
+      {{ end }}
+      <div id="library-view" {{ if eq .View "storage" }}hidden{{ end }}>
 
       <nav class="breadcrumb" aria-label="Caminho">
-        {{ if .Crumbs }}
-        <a href="/" data-drop-path="">Início</a>
+        {{ if eq .View "trash" }}
+        <span class="crumb-current">Lixeira</span>
+        {{ else if .Crumbs }}
+        <a class="crumb-root" href="/" data-drop-path="" data-drop-name="Início" aria-label="Início" title="Início"><i class="icon-folder" aria-hidden="true"></i><span>Início</span></a>
         {{ range .Crumbs }}
         <i class="icon-chevron-right"></i>
         {{ if .Current }}<span class="crumb-current" data-drop-path="{{ .Path }}">{{ .Name }}</span>{{ else }}<a href="/?path={{ .Path }}" data-drop-path="{{ .Path }}">{{ .Name }}</a>{{ end }}
         {{ end }}
         {{ else }}
-        <span class="crumb-current" data-drop-path="">Início</span>
+        <span class="crumb-current crumb-root" data-drop-path="" data-drop-name="Início" aria-label="Início" title="Início"><i class="icon-folder" aria-hidden="true"></i><span>Início</span></span>
         {{ end }}
       </nav>
 
       <div class="gallery-header">
         <div class="title-group">
-          <h1>Sua biblioteca</h1>
+          <h1>{{ if eq .View "recent" }}Recentes{{ else if eq .View "photos" }}Fotos{{ else if eq .View "starred" }}Com estrela{{ else if eq .View "trash" }}Lixeira{{ else }}Sua biblioteca{{ end }}</h1>
           {{ template "file-count" .Count }}
+          {{ if eq .View "trash" }}<span class="trash-hint">Os itens são excluídos definitivamente após 30 dias.</span>{{ end }}
         </div>
 
-        <button id="new-folder" class="btn" type="button">
+        <button id="new-folder" class="btn" type="button" {{ if eq .View "trash" }}hidden{{ end }}>
           <i class="icon-folder-plus"></i> Nova pasta
         </button>
       </div>
@@ -98,8 +125,8 @@
           <button id="bulk-download" class="btn" type="button" title="Baixar selecionados">
             <i class="icon-download"></i> Baixar
           </button>
-          <button id="bulk-delete" class="btn btn-danger" type="button" title="Excluir selecionados">
-            <i class="icon-trash"></i> Excluir
+          <button id="bulk-delete" class="btn btn-danger" type="button" title="Mover para a lixeira">
+            <i class="icon-trash"></i> Lixeira
           </button>
           <button id="bulk-cancel" class="btn" type="button" title="Cancelar seleção">
             Cancelar
@@ -117,6 +144,7 @@
         hx-sync="this:replace"
       >
         <input id="path-input" type="hidden" name="path" value="{{ .Path }}" />
+        <input id="view-input" type="hidden" name="view" value="{{ .View }}" />
 
         <div class="search-box">
           <i class="icon-search"></i>
@@ -131,7 +159,7 @@
           />
         </div>
 
-        <div class="toolbar-right">
+        <div class="toolbar-right" {{ if eq .View "photos" }}hidden{{ end }}>
           <label class="sort-label" for="sort-select">Ordenar por</label>
           <select id="sort-select" name="sort">
             <option value="date" {{ if eq .Sort "date" }}selected{{ end }}>Data</option>
@@ -164,10 +192,15 @@
         </div>
       </form>
 
-      <div id="file-list" class="gallery">
-        {{ range .Folders }}{{ template "folder-card" . }}{{ end }}
-        {{ range .Files }}{{ template "file-card" . }}{{ end }}
-        {{ if and (not .Folders) (not .Files) }}{{ template "empty-state" .Query }}{{ end }}
+      <div id="file-list" class="gallery{{ if eq .View "photos" }} photo-mosaic{{ end }}"{{ if eq .View "photos" }} aria-label="Fotos, 3 colunas"{{ end }}>
+        {{ if eq .View "photos" }}
+          {{ range .Files }}{{ template "photo-card" . }}{{ end }}
+        {{ else }}
+          {{ range .Folders }}{{ template "folder-card" . }}{{ end }}
+          {{ range .Files }}{{ template "file-card" . }}{{ end }}
+        {{ end }}
+        {{ if and (not .Folders) (not .Files) }}{{ template "empty-state" . }}{{ end }}
+      </div>
       </div>
     </main>
 
@@ -227,7 +260,7 @@
         <p id="confirm-text"></p>
         <div class="modal-actions">
           <button class="btn" value="cancel" autofocus>Cancelar</button>
-          <button class="btn btn-danger" value="confirm">Excluir</button>
+          <button id="confirm-action" class="btn btn-danger" value="confirm">Excluir</button>
         </div>
       </form>
     </dialog>
@@ -253,6 +286,27 @@
       </form>
     </dialog>
 
+    <dialog id="rename-dialog" class="modal">
+      <form id="rename-form">
+        <h2>Renomear</h2>
+        <input id="rename-kind" type="hidden" />
+        <input id="rename-path" type="hidden" />
+        <input
+          id="rename-name"
+          class="text-input"
+          type="text"
+          maxlength="220"
+          aria-label="Novo nome"
+          autocomplete="off"
+        />
+        <p id="rename-error" class="form-error" hidden></p>
+        <div class="modal-actions">
+          <button id="rename-cancel" class="btn" type="button">Cancelar</button>
+          <button class="btn btn-primary" type="submit">Salvar</button>
+        </div>
+      </form>
+    </dialog>
+
     <!-- Confirmação de mover itens -->
     <dialog id="move-dialog" class="modal">
       <form method="dialog">
@@ -264,15 +318,43 @@
         </div>
       </form>
     </dialog>
+
+    <dialog id="photo-viewer" class="photo-viewer" aria-label="Visualizador de fotos">
+      <div class="photo-viewer-shell">
+        <button id="photo-viewer-close" class="photo-viewer-close" type="button" aria-label="Fechar visualização">
+          <i class="icon-x"></i>
+        </button>
+        <figure class="photo-stage">
+          <img id="photo-viewer-image" alt="" />
+        </figure>
+        <footer class="photo-viewer-footer">
+          <div class="photo-viewer-info">
+            <strong id="photo-viewer-name"></strong>
+            <span id="photo-viewer-meta"></span>
+          </div>
+          <div class="photo-viewer-actions">
+            <button id="photo-viewer-star" class="photo-viewer-action" type="button" aria-label="Adicionar estrela" aria-pressed="false">
+              <i class="icon-star"></i><span>Estrela</span>
+            </button>
+            <a id="photo-viewer-download" class="photo-viewer-action" href="#" download>
+              <i class="icon-download"></i><span>Baixar</span>
+            </a>
+            <button id="photo-viewer-delete" class="photo-viewer-action" type="button">
+              <i class="icon-trash"></i><span>Excluir</span>
+            </button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
   </body>
 </html>
 
 {{ define "file-count" }}<span id="file-count" class="file-count" hx-swap-oob="true">{{ if .Search }}Resultados: {{ end }}{{ if .Folders }}{{ .Folders }} {{ if eq .Folders 1 }}pasta{{ else }}pastas{{ end }}{{ if .Files }} · {{ end }}{{ end }}{{ if or .Files (not .Folders) }}{{ .Files }} {{ if eq .Files 1 }}arquivo{{ else }}arquivos{{ end }}{{ end }}</span>{{ end }}
 
-{{ define "empty-state" }}<div class="empty-state">{{ if . }}Nenhum resultado para “{{ . }}”.{{ else }}Esta pasta está vazia.<br />Arraste arquivos para cá ou use o botão de envio.{{ end }}</div>{{ end }}
+{{ define "empty-state" }}<div class="empty-state">{{ if .Query }}Nenhum resultado para “{{ .Query }}”.{{ else if eq .View "recent" }}Nenhum arquivo recente enviado na última semana.{{ else if eq .View "photos" }}Nenhuma foto encontrada.{{ else if eq .View "starred" }}Nenhum item com estrela.{{ else if eq .View "trash" }}A lixeira está vazia.{{ else }}Esta pasta está vazia.<br />Arraste arquivos para cá ou use o botão de envio.{{ end }}</div>{{ end }}
 
 {{ define "storage-stats" }}
-<section id="storage-stats" class="storage" hx-swap-oob="true" aria-label="Armazenamento">
+<section id="storage-stats" class="storage" aria-label="Armazenamento">
   <div class="storage-head">
     <span class="storage-title"><i class="icon-hard-drive"></i> Armazenamento</span>
     <span class="storage-numbers">
@@ -290,58 +372,127 @@
     <span><i class="dot dot-free"></i>Livre</span>
   </div>
   {{ end }}
+
 </section>
 {{ end }}
 
+{{ define "photo-card" }}
+<figure class="file-card photo-tile">
+  <label class="card-checkbox" title="Selecionar foto">
+    <input type="checkbox" class="select-item" data-path="{{ .Path }}" data-kind="file" data-name="{{ .Name }}" />
+    <i class="icon-check"></i>
+  </label>
+  <button
+    class="photo-open"
+    type="button"
+    data-path="{{ .Path }}"
+    data-name="{{ .Name }}"
+    data-url="{{ .URL }}"
+    data-size="{{ .SizeLabel }}"
+    data-date="{{ .DateLabel }}"
+    data-location="{{ .Location }}"
+    data-starred="{{ .Starred }}"
+    aria-label="Visualizar {{ .Name }}"
+  >
+    <img loading="lazy" src="{{ .URL }}" alt="{{ .Name }}" />
+  </button>
+</figure>
+{{ end }}
+
 {{ define "folder-card" }}
-<div class="file-card folder-card" draggable="true" data-drag-path="{{ .Path }}" data-drag-kind="folder" data-drag-name="{{ .Name }}">
+<div class="file-card folder-card" {{ if not .Trashed }}draggable="true" data-drag-path="{{ .Path }}" data-drag-kind="folder" data-drag-name="{{ .Name }}"{{ end }}>
+  {{ if not .Trashed }}
   <label class="card-checkbox" title="Selecionar pasta">
     <input type="checkbox" class="select-item" data-path="{{ .Path }}" data-kind="folder" data-name="{{ .Name }}" />
     <i class="icon-check"></i>
   </label>
-  <a class="folder-link" href="/?path={{ .Path }}" title="{{ .Name }}">
+  {{ end }}
+  {{ if .Trashed }}<div class="folder-link" title="{{ .Name }}">{{ else }}<a class="folder-link" href="/?path={{ .Path }}" title="{{ .Name }}">{{ end }}
     <i class="icon-folder folder-icon"></i>
     <span class="file-name-wrap">
       <span class="file-name">{{ .Name }}</span>
       {{ if .Located }}<span class="file-location">{{ .Location }}</span>{{ end }}
     </span>
-  </a>
+  {{ if .Trashed }}</div>{{ else }}</a>{{ end }}
 
   <div class="card-actions">
+    {{ if .Trashed }}
+    <span class="file-date">Excluída {{ .TrashDateLabel }}</span>
+    <button class="card-action mobile-menu-toggle" type="button" title="Mais opções" aria-label="Abrir opções de {{ .Name }}" aria-expanded="false">
+      <i class="icon-ellipsis-vertical"></i>
+    </button>
+    <div class="mobile-action-menu" role="group" aria-label="Opções de {{ .Name }}">
+      <button class="card-action restore-button" type="button" title="Restaurar pasta" aria-label="Restaurar pasta {{ .Name }}" data-name="{{ .Name }}" hx-post="/trash/restore?id={{ .TrashID }}&view=trash" hx-include="#sort-form" hx-target="closest .file-card" hx-swap="delete">
+        <i class="icon-rotate-ccw"></i><span class="mobile-action-label">Restaurar</span>
+      </button>
+      <button class="card-action delete-button" type="button" title="Excluir definitivamente" aria-label="Excluir definitivamente {{ .Name }}" data-name="{{ .Name }}" data-kind="folder" data-permanent="true" hx-delete="/trash?id={{ .TrashID }}&view=trash" hx-include="#sort-form" hx-confirm="Excluir esta pasta definitivamente?" hx-target="closest .file-card" hx-swap="delete">
+        <i class="icon-trash"></i><span class="mobile-action-label">Excluir definitivamente</span>
+      </button>
+    </div>
+    {{ else }}
+    <button class="card-action mobile-menu-toggle" type="button" title="Mais opções" aria-label="Abrir opções de {{ .Name }}" aria-expanded="false">
+      <i class="icon-ellipsis-vertical"></i>
+    </button>
+    <div class="mobile-action-menu" role="group" aria-label="Opções de {{ .Name }}">
+    <button
+      class="card-action star-button{{ if .Starred }} starred{{ end }}"
+      type="button"
+      title="{{ if .Starred }}Remover estrela{{ else }}Adicionar estrela{{ end }}"
+      aria-label="{{ if .Starred }}Remover estrela de{{ else }}Adicionar estrela a{{ end }} {{ .Name }}"
+      aria-pressed="{{ .Starred }}"
+      data-kind="folder"
+      data-path="{{ .Path }}"
+      data-name="{{ .Name }}"
+      data-starred="{{ .Starred }}"
+    >
+      <i class="icon-star"></i><span class="mobile-action-label">{{ if .Starred }}Remover estrela{{ else }}Adicionar estrela{{ end }}</span>
+    </button>
+    <button class="card-action rename-button" type="button" title="Renomear pasta" aria-label="Renomear pasta {{ .Name }}" data-kind="folder" data-path="{{ .Path }}" data-name="{{ .Name }}">
+      <i class="icon-pencil"></i><span class="mobile-action-label">Renomear</span>
+    </button>
     <button
       class="card-action delete-button"
       type="button"
-      title="Excluir pasta"
-      aria-label="Excluir pasta {{ .Name }}"
+      title="Mover para a lixeira"
+      aria-label="Mover pasta {{ .Name }} para a lixeira"
       data-name="{{ .Name }}"
       data-kind="folder"
       hx-delete="/delete?folder={{ .Path | urlquery }}"
       hx-include="#sort-form"
-      hx-confirm="Excluir esta pasta?"
+      hx-confirm="Mover esta pasta para a lixeira?"
       hx-target="closest .file-card"
       hx-swap="delete"
     >
-      <i class="icon-trash"></i>
+      <i class="icon-trash"></i><span class="mobile-action-label">Excluir</span>
     </button>
+    <button class="card-action mobile-folder-download" type="button" title="Baixar pasta" aria-label="Baixar pasta {{ .Name }}" data-path="{{ .Path }}" data-name="{{ .Name }}">
+      <i class="icon-download"></i><span class="mobile-action-label">Baixar</span>
+    </button>
+    </div>
+    {{ end }}
   </div>
 </div>
 {{ end }}
 
 {{ define "file-card" }}
-<div class="file-card" draggable="true" data-drag-path="{{ .Path }}" data-drag-kind="file" data-drag-name="{{ .Name }}">
+<div class="file-card" {{ if not .Trashed }}draggable="true" data-drag-path="{{ .Path }}" data-drag-kind="file" data-drag-name="{{ .Name }}"{{ end }}>
+  {{ if not .Trashed }}
   <label class="card-checkbox" title="Selecionar arquivo">
     <input type="checkbox" class="select-item" data-path="{{ .Path }}" data-kind="file" data-name="{{ .Name }}" />
     <i class="icon-check"></i>
   </label>
-  <a class="file-thumb" href="{{ .URL }}" target="_blank" rel="noopener">
-    {{ if eq .Kind "video" }}
+  {{ end }}
+  {{ if .Trashed }}<div class="file-thumb">{{ else }}<a class="file-thumb" href="{{ .URL }}" target="_blank" rel="noopener">{{ end }}
+    {{ if .Trashed }}
+    <div class="file-card-not-media">{{ .Ext }}</div>
+    {{ else if eq .Kind "video" }}
     <video muted preload="metadata" src="{{ .URL }}"></video>
     {{ else if eq .Kind "image" }}
     <img loading="lazy" src="{{ .URL }}" alt="{{ .Name }}" />
     {{ else }}
     <div class="file-card-not-media">{{ .Ext }}</div>
     {{ end }}
-  </a>
+  {{ if .Trashed }}</div>{{ else }}</a>{{ end }}
 
   <div class="card-footer">
     <div class="file-info">
@@ -360,9 +511,42 @@
     </div>
 
     <span class="file-size">{{ .SizeLabel }}</span>
-    <span class="file-date">{{ .DateLabel }}</span>
+    <span class="file-date">{{ if .Trashed }}Excluído {{ .TrashDateLabel }}{{ else }}{{ .DateLabel }}{{ end }}</span>
 
     <div class="card-actions">
+      {{ if .Trashed }}
+      <button class="card-action mobile-menu-toggle" type="button" title="Mais opções" aria-label="Abrir opções de {{ .Name }}" aria-expanded="false">
+        <i class="icon-ellipsis-vertical"></i>
+      </button>
+      <div class="mobile-action-menu" role="group" aria-label="Opções de {{ .Name }}">
+        <button class="card-action restore-button" type="button" title="Restaurar arquivo" aria-label="Restaurar arquivo {{ .Name }}" data-name="{{ .Name }}" hx-post="/trash/restore?id={{ .TrashID }}&view=trash" hx-include="#sort-form" hx-target="closest .file-card" hx-swap="delete">
+          <i class="icon-rotate-ccw"></i><span class="mobile-action-label">Restaurar</span>
+        </button>
+        <button class="card-action delete-button" type="button" title="Excluir definitivamente" aria-label="Excluir definitivamente {{ .Name }}" data-name="{{ .Name }}" data-kind="file" data-permanent="true" hx-delete="/trash?id={{ .TrashID }}&view=trash" hx-include="#sort-form" hx-confirm="Excluir este arquivo definitivamente?" hx-target="closest .file-card" hx-swap="delete">
+          <i class="icon-trash"></i><span class="mobile-action-label">Excluir definitivamente</span>
+        </button>
+      </div>
+      {{ else }}
+      <button class="card-action mobile-menu-toggle" type="button" title="Mais opções" aria-label="Abrir opções de {{ .Name }}" aria-expanded="false">
+        <i class="icon-ellipsis-vertical"></i>
+      </button>
+      <div class="mobile-action-menu" role="group" aria-label="Opções de {{ .Name }}">
+      <button
+        class="card-action star-button{{ if .Starred }} starred{{ end }}"
+        type="button"
+        title="{{ if .Starred }}Remover estrela{{ else }}Adicionar estrela{{ end }}"
+        aria-label="{{ if .Starred }}Remover estrela de{{ else }}Adicionar estrela a{{ end }} {{ .Name }}"
+        aria-pressed="{{ .Starred }}"
+        data-kind="file"
+        data-path="{{ .Path }}"
+        data-name="{{ .Name }}"
+        data-starred="{{ .Starred }}"
+      >
+        <i class="icon-star"></i><span class="mobile-action-label">{{ if .Starred }}Remover estrela{{ else }}Adicionar estrela{{ end }}</span>
+      </button>
+      <button class="card-action rename-button" type="button" title="Renomear arquivo" aria-label="Renomear arquivo {{ .Name }}" data-kind="file" data-path="{{ .Path }}" data-name="{{ .Name }}">
+        <i class="icon-pencil"></i><span class="mobile-action-label">Renomear</span>
+      </button>
       <a
         class="card-action"
         href="{{ .URL }}?download=1"
@@ -370,24 +554,26 @@
         title="Baixar"
         aria-label="Baixar {{ .Name }}"
       >
-        <i class="icon-download"></i>
+        <i class="icon-download"></i><span class="mobile-action-label">Baixar</span>
       </a>
 
       <button
         class="card-action delete-button"
         type="button"
-        title="Excluir"
-        aria-label="Excluir {{ .Name }}"
+        title="Mover para a lixeira"
+        aria-label="Mover {{ .Name }} para a lixeira"
         data-name="{{ .Name }}"
         data-kind="file"
         hx-delete="/delete?file={{ .Path | urlquery }}"
         hx-include="#sort-form"
-        hx-confirm="Excluir este arquivo?"
+        hx-confirm="Mover este arquivo para a lixeira?"
         hx-target="closest .file-card"
         hx-swap="delete"
       >
-        <i class="icon-trash"></i>
+        <i class="icon-trash"></i><span class="mobile-action-label">Excluir</span>
       </button>
+      </div>
+      {{ end }}
     </div>
   </div>
 </div>

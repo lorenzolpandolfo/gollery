@@ -7,6 +7,8 @@
     return document.getElementById(id);
   }
 
+  var fileList = $("file-list");
+
   function safeGet(key) {
     try {
       return localStorage.getItem(key);
@@ -171,22 +173,29 @@
   var confirmDialog = $("confirm-dialog");
   var doneDialog = $("upload-done");
   var folderDialog = $("folder-dialog");
+  var renameDialog = $("rename-dialog");
 
   closeOnBackdrop(confirmDialog);
   closeOnBackdrop(doneDialog);
   closeOnBackdrop(folderDialog);
+  closeOnBackdrop(renameDialog);
 
-  function confirmDeletion(name, isFolder) {
+  function confirmDeletion(name, isFolder, permanent) {
     return new Promise(function (resolve) {
-      $("confirm-title").textContent = isFolder
-        ? "Excluir pasta?"
-        : "Excluir arquivo?";
+      $("confirm-title").textContent = permanent
+        ? "Excluir definitivamente?"
+        : "Mover para a lixeira?";
 
       var subject = name ? "“" + name + "”" : isFolder ? "Essa pasta" : "Esse arquivo";
 
-      $("confirm-text").textContent = isFolder
-        ? subject + " e tudo o que está dentro dela serão excluídos permanentemente. Essa ação não pode ser desfeita."
-        : subject + " será excluído permanentemente. Essa ação não pode ser desfeita.";
+      $("confirm-text").textContent = permanent
+        ? (isFolder
+          ? subject + " e tudo o que está dentro dela serão excluídos permanentemente. Essa ação não pode ser desfeita."
+          : subject + " será excluído permanentemente. Essa ação não pode ser desfeita.")
+        : (isFolder
+          ? subject + " e tudo o que está dentro dela serão movidos para a lixeira e apagados após 30 dias."
+          : subject + " será movido para a lixeira e apagado após 30 dias.");
+      $("confirm-action").textContent = permanent ? "Excluir" : "Mover para lixeira";
 
       confirmDialog.returnValue = "";
       confirmDialog.addEventListener(
@@ -209,10 +218,18 @@
     var elt = e.detail.elt;
     var name = elt && elt.dataset.name;
     var isFolder = !!elt && elt.dataset.kind === "folder";
+    var permanent = !!elt && elt.dataset.permanent === "true";
 
-    confirmDeletion(name, isFolder).then(function (confirmed) {
+    confirmDeletion(name, isFolder, permanent).then(function (confirmed) {
       if (confirmed) e.detail.issueRequest(true);
     });
+  });
+
+  document.body.addEventListener("htmx:responseError", function (e) {
+    var xhr = e.detail && e.detail.xhr;
+    if (xhr && xhr.responseText) {
+      alert(xhr.responseText.trim());
+    }
   });
 
   /* ---------------- Nova pasta ---------------- */
@@ -235,6 +252,71 @@
 
   $("folder-cancel").addEventListener("click", function () {
     folderDialog.close();
+  });
+
+  var renameForm = $("rename-form");
+  var renameName = $("rename-name");
+  var renameError = $("rename-error");
+
+  function showRenameError(message) {
+    renameError.textContent = message;
+    renameError.hidden = false;
+  }
+
+  fileList.addEventListener("click", function (e) {
+    var button = e.target.closest(".rename-button");
+    if (!button) return;
+    e.preventDefault();
+    $("rename-kind").value = button.dataset.kind;
+    $("rename-path").value = button.dataset.path;
+    renameName.value = button.dataset.name;
+    renameError.hidden = true;
+    renameDialog.showModal();
+    renameName.focus();
+    renameName.select();
+  });
+
+  $("rename-cancel").addEventListener("click", function () {
+    renameDialog.close();
+  });
+
+  renameForm.addEventListener("submit", async function (e) {
+    e.preventDefault();
+    var name = renameName.value.trim();
+    if (!name) {
+      showRenameError("Digite um nome.");
+      return;
+    }
+
+    try {
+      var response = await fetch("/rename", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: $("rename-kind").value,
+          path: $("rename-path").value,
+          name: name,
+        }),
+      });
+
+      if (response.ok) {
+        renameDialog.close();
+        refreshList();
+        return;
+      }
+
+      if (response.status === 409) {
+        showRenameError("Já existe um item com esse nome nessa pasta.");
+      } else if (response.status === 400) {
+        showRenameError("Nome inválido. Não use / ou \\ e não comece com ponto.");
+      } else if (response.status === 404) {
+        showRenameError("O item não foi encontrado.");
+      } else {
+        showRenameError("Não foi possível renomear o item.");
+      }
+    } catch (err) {
+      showRenameError("Falha de conexão.");
+    }
   });
 
   folderForm.addEventListener("submit", async function (e) {
@@ -545,7 +627,6 @@
   var bulkDownloadBtn = $("bulk-download");
   var bulkDeleteBtn = $("bulk-delete");
   var bulkCancelBtn = $("bulk-cancel");
-  var fileList = $("file-list");
 
   var selectedItems = new Set();
 
@@ -600,12 +681,8 @@
   }
 
   function clearSelection() {
-    selectedItems.forEach(function (key) {
-      var parts = key.split(":");
-      var kind = parts[0];
-      var path = parts.slice(1).join(":");
-      var checkbox = document.querySelector('.select-item[data-kind="' + kind + '"][data-path="' + path + '"]');
-      if (checkbox) {
+    fileList.querySelectorAll(".select-item").forEach(function (checkbox) {
+      if (selectedItems.has(getItemKey(checkbox))) {
         checkbox.checked = false;
         updateItemSelection(checkbox, false);
       }
@@ -640,6 +717,7 @@
 
     if (longPressedCard === card) {
       e.preventDefault();
+      e.stopImmediatePropagation();
       longPressedCard = null;
       clearTimeout(longPressClickTimer);
       return;
@@ -672,6 +750,270 @@
       toggleItem(checkbox);
     }
     lastSelectedCard = card;
+  });
+
+  fileList.addEventListener("click", async function (e) {
+    var button = e.target.closest(".star-button");
+    if (!button) return;
+
+    e.preventDefault();
+    var starred = button.dataset.starred !== "true";
+    button.disabled = true;
+
+    try {
+      var response = await fetch("/star", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: button.dataset.kind,
+          path: button.dataset.path,
+          starred: starred,
+        }),
+      });
+
+      if (!response.ok) {
+        var err = await response.text();
+        alert("Erro ao atualizar estrela: " + (err || response.statusText));
+        return;
+      }
+
+      var result = await response.json();
+      button.dataset.starred = String(result.starred);
+      button.classList.toggle("starred", result.starred);
+      button.setAttribute("aria-pressed", String(result.starred));
+      button.title = result.starred ? "Remover estrela" : "Adicionar estrela";
+      button.setAttribute(
+        "aria-label",
+        (result.starred ? "Remover estrela de " : "Adicionar estrela a ") + button.dataset.name
+      );
+      var label = button.querySelector(".mobile-action-label");
+      if (label) {
+        label.textContent = result.starred ? "Remover estrela" : "Adicionar estrela";
+      }
+
+      if ($("view-input").value === "starred" && !result.starred) {
+        refreshList();
+      }
+    } catch (err) {
+      alert("Falha ao atualizar estrela: " + err.message);
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  /* ---------------- Visualizador de fotos ---------------- */
+
+  var photoViewer = $("photo-viewer");
+  var photoViewerImage = $("photo-viewer-image");
+  var photoViewerName = $("photo-viewer-name");
+  var photoViewerMeta = $("photo-viewer-meta");
+  var photoViewerStar = $("photo-viewer-star");
+  var photoViewerDownload = $("photo-viewer-download");
+  var photoViewerDelete = $("photo-viewer-delete");
+  var activePhoto = null;
+
+  function syncPhotoViewerStar(starred) {
+    photoViewerStar.dataset.starred = String(starred);
+    photoViewerStar.classList.toggle("starred", starred);
+    photoViewerStar.setAttribute("aria-pressed", String(starred));
+    photoViewerStar.setAttribute(
+      "aria-label",
+      starred ? "Remover estrela" : "Adicionar estrela"
+    );
+    var label = photoViewerStar.querySelector("span");
+    if (label) label.textContent = starred ? "Com estrela" : "Estrela";
+    if (activePhoto) activePhoto.dataset.starred = String(starred);
+  }
+
+  fileList.addEventListener("click", function (e) {
+    var button = e.target.closest(".photo-open");
+    if (!button) return;
+
+    if (window.matchMedia("(max-width: 768px)").matches && selectedItems.size > 0) {
+      e.preventDefault();
+      var checkbox = button.closest(".file-card").querySelector(".select-item");
+      checkbox.checked = !checkbox.checked;
+      toggleItem(checkbox);
+      return;
+    }
+
+    activePhoto = button;
+    photoViewerImage.src = button.dataset.url;
+    photoViewerImage.alt = button.dataset.name;
+    photoViewerName.textContent = button.dataset.name;
+    photoViewerMeta.textContent = [
+      button.dataset.date,
+      button.dataset.size,
+      button.dataset.location,
+    ].filter(Boolean).join(" · ");
+    photoViewerDownload.href = button.dataset.url + "?download=1";
+    photoViewerDownload.download = button.dataset.name;
+    photoViewerStar.dataset.kind = "file";
+    photoViewerStar.dataset.path = button.dataset.path;
+    syncPhotoViewerStar(button.dataset.starred === "true");
+    photoViewer.showModal();
+  });
+
+  closeOnBackdrop(photoViewer);
+  $("photo-viewer-close").addEventListener("click", function () {
+    photoViewer.close();
+  });
+  photoViewer.addEventListener("close", function () {
+    activePhoto = null;
+    photoViewerImage.removeAttribute("src");
+  });
+
+  photoViewerStar.addEventListener("click", async function () {
+    if (!activePhoto) return;
+
+    var starred = photoViewerStar.dataset.starred !== "true";
+    photoViewerStar.disabled = true;
+    try {
+      var response = await fetch("/star", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "file",
+          path: activePhoto.dataset.path,
+          starred: starred,
+        }),
+      });
+      if (!response.ok) {
+        var error = await response.text();
+        alert("Erro ao atualizar estrela: " + (error || response.statusText));
+        return;
+      }
+
+      var result = await response.json();
+      syncPhotoViewerStar(result.starred);
+    } catch (error) {
+      alert("Falha ao atualizar estrela: " + error.message);
+    } finally {
+      photoViewerStar.disabled = false;
+    }
+  });
+
+  photoViewerDelete.addEventListener("click", async function () {
+    if (!activePhoto) return;
+    var photo = activePhoto;
+    if (!(await confirmDeletion(photo.dataset.name, false, false))) return;
+
+    photoViewerDelete.disabled = true;
+    try {
+      var response = await fetch("/delete?file=" + encodeURIComponent(photo.dataset.path), {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        var error = await response.text();
+        alert("Erro ao mover para a lixeira: " + (error || response.statusText));
+        return;
+      }
+
+      photoViewer.close();
+      refreshList();
+    } catch (error) {
+      alert("Falha ao mover para a lixeira: " + error.message);
+    } finally {
+      photoViewerDelete.disabled = false;
+    }
+  });
+
+  function closeMobileMenus() {
+    fileList.classList.remove("menu-open");
+    document.querySelectorAll(".file-card.menu-open").forEach(function (card) {
+      card.classList.remove("menu-open");
+      var toggle = card.querySelector(".mobile-menu-toggle");
+      if (toggle) toggle.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  document.body.addEventListener("click", function (e) {
+    var toggle = e.target.closest(".mobile-menu-toggle");
+    if (toggle) {
+      e.preventDefault();
+      var card = toggle.closest(".file-card");
+      var wasOpen = card.classList.contains("menu-open");
+      closeMobileMenus();
+      if (!wasOpen) {
+        card.classList.add("menu-open");
+        fileList.classList.add("menu-open");
+        toggle.setAttribute("aria-expanded", "true");
+      }
+      return;
+    }
+
+    if (e.target.closest(".mobile-action-menu")) {
+      closeMobileMenus();
+      return;
+    }
+    closeMobileMenus();
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      closeMobileMenus();
+      if (document.querySelector("dialog[open]")) return;
+      if (selectedItems.size > 0) {
+        e.preventDefault();
+        clearSelection();
+      }
+      return;
+    }
+
+    if (e.key === "/" && !$("library-view").hidden &&
+        !e.target.closest("input, textarea, select, [contenteditable='true']")) {
+      if (document.querySelector("dialog[open]")) return;
+      e.preventDefault();
+      searchInput.focus();
+      return;
+    }
+
+    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "a") return;
+    if (e.target.closest("input, textarea, select, [contenteditable='true']")) return;
+    if (document.querySelector("dialog[open]")) return;
+
+    var checkboxes = fileList.querySelectorAll(".select-item");
+    if (checkboxes.length === 0) return;
+
+    e.preventDefault();
+    checkboxes.forEach(function (checkbox) {
+      selectItem(checkbox);
+    });
+    updateBulkToolbar();
+  });
+
+  fileList.addEventListener("click", async function (e) {
+    var button = e.target.closest(".mobile-folder-download");
+    if (!button) return;
+    e.preventDefault();
+    button.disabled = true;
+    try {
+      var response = await fetch("/bulk-download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: [{ kind: "folder", path: button.dataset.path }],
+        }),
+      });
+      if (!response.ok) {
+        var errorText = await response.text();
+        alert("Erro ao baixar a pasta: " + (errorText || response.statusText));
+        return;
+      }
+      var blob = await response.blob();
+      var url = URL.createObjectURL(blob);
+      var link = document.createElement("a");
+      link.href = url;
+      link.download = (button.dataset.name || "pasta") + ".zip";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert("Falha ao baixar a pasta: " + err.message);
+    } finally {
+      button.disabled = false;
+    }
   });
 
   bulkCancelBtn.addEventListener("click", clearSelection);
@@ -722,19 +1064,19 @@
     }
   });
 
-  // Exclusão em lote
+  // Move os itens selecionados para a lixeira.
   bulkDeleteBtn.addEventListener("click", async function () {
     var items = getSelectedItems();
     if (items.length === 0) return;
 
     var confirmMsg = items.length === 1
-      ? (items[0].kind === "folder" ? "Excluir esta pasta e todo o seu conteúdo?" : "Excluir este arquivo?")
-      : "Excluir " + items.length + " itens selecionados?";
+      ? (items[0].kind === "folder" ? "Mover esta pasta e todo o seu conteúdo para a lixeira?" : "Mover este arquivo para a lixeira?")
+      : "Mover " + items.length + " itens para a lixeira?";
 
-    if (!confirm(confirmMsg + " Esta ação não pode ser desfeita.")) return;
+    if (!confirm(confirmMsg + " Os itens serão excluídos definitivamente após 30 dias.")) return;
 
     bulkDeleteBtn.disabled = true;
-    bulkDeleteBtn.textContent = " Excluindo...";
+    bulkDeleteBtn.textContent = " Movendo...";
 
     try {
       var response = await fetch("/bulk-delete", {
@@ -748,13 +1090,13 @@
         refreshList();
       } else {
         var err = await response.text();
-        alert("Erro ao excluir: " + (err || response.statusText));
+        alert("Erro ao mover para a lixeira: " + (err || response.statusText));
       }
     } catch (err) {
       alert("Falha de conexão: " + err.message);
     } finally {
       bulkDeleteBtn.disabled = false;
-      bulkDeleteBtn.innerHTML = '<i class="icon-trash"></i> Excluir';
+      bulkDeleteBtn.innerHTML = '<i class="icon-trash"></i> Lixeira';
     }
   });
 
@@ -762,6 +1104,7 @@
   document.body.addEventListener("htmx:afterSwap", function (e) {
     if (e.detail.target.id === "file-list") {
       clearSelection();
+      closeMobileMenus();
     }
   });
 
@@ -783,6 +1126,55 @@
   var longPressClickTimer = null;
 
   closeOnBackdrop(moveDialog);
+
+  /* ---------------- Pinça para ampliar/reduzir a grade de fotos ---------------- */
+
+  var photoColumns = 3;
+  var pinchStartDistance = 0;
+  var pinchStartColumns = 3;
+
+  function touchDistance(touches) {
+    var dx = touches[0].clientX - touches[1].clientX;
+    var dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function setPhotoColumns(columns) {
+    photoColumns = Math.max(3, Math.min(6, columns));
+    fileList.style.setProperty("--photo-columns", String(photoColumns));
+    fileList.setAttribute("aria-label", "Fotos, " + photoColumns + " colunas");
+  }
+
+  fileList.addEventListener("touchstart", function (e) {
+    if (!fileList.classList.contains("photo-mosaic") || e.touches.length < 2) return;
+
+    pinchStartDistance = touchDistance(e.touches);
+    pinchStartColumns = photoColumns;
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+    touchDragSource = null;
+  }, { passive: true });
+
+  fileList.addEventListener("touchmove", function (e) {
+    if (!pinchStartDistance || e.touches.length < 2) return;
+
+    e.preventDefault();
+    var distanceChange = pinchStartDistance - touchDistance(e.touches);
+    var steps = Math.trunc(distanceChange / 45);
+    var columns = Math.max(3, Math.min(6, pinchStartColumns + steps));
+    if (columns !== photoColumns) setPhotoColumns(columns);
+  }, { passive: false });
+
+  function endPhotoPinch(e) {
+    if (!pinchStartDistance || (e.type !== "touchcancel" && e.touches.length >= 2)) return;
+    if (e.cancelable) e.preventDefault();
+    pinchStartDistance = 0;
+  }
+
+  fileList.addEventListener("touchend", endPhotoPinch, { passive: false });
+  fileList.addEventListener("touchcancel", endPhotoPinch, { passive: false });
 
   function isInvalidMoveTarget(items, targetPath) {
     return items.some(function (item) {
@@ -825,14 +1217,10 @@
     var checkbox = card.querySelector(".select-item");
     if (!checkbox) return;
 
-    // Se tem itens selecionados e o card atual não está selecionado, usa a seleção
-    // Se o card atual está selecionado, usa a seleção
-    // Se não tem nada selecionado, seleciona apenas este card
-    if (selectedItems.size === 0 || (selectedItems.size > 0 && checkbox.checked)) {
-      // Usa itens selecionados
+    // Arrastar um item selecionado move a seleção toda; sem seleção, move só este item.
+    if (selectedItems.size > 0 && checkbox.checked) {
       dragSourceCards = getSelectedItems();
     } else {
-      // Seleciona apenas este item para o drag
       dragSourceCards = [{ kind: checkbox.dataset.kind, path: checkbox.dataset.path }];
     }
 
@@ -974,7 +1362,7 @@
     e.preventDefault();
     var itemsToMove = dragSourceCards.slice();
     var targetPath = target.dataset.dropPath;
-    var targetName = target.textContent.trim();
+    var targetName = target.dataset.dropName || target.textContent.trim() || "Início";
     target.classList.remove("drag-over");
 
     if (isInvalidMoveTarget(itemsToMove, targetPath)) return;
@@ -1015,6 +1403,7 @@
   /* ---------------- Long press para seleção (mobile) ---------------- */
 
   fileList.addEventListener("touchstart", function (e) {
+    if (e.touches.length > 1) return;
     var card = e.target.closest(".file-card");
     if (!card) return;
 
@@ -1024,8 +1413,9 @@
     // Se já está selecionado, não inicia long press
     if (checkbox.checked) return;
 
-    // Não inicia long press se tocou em checkbox ou botão
-    if (e.target.closest("button") || e.target.closest("label") || e.target === checkbox) return;
+    // O botão da miniatura também permite selecionar por toque prolongado.
+    if ((e.target.closest("button") && !e.target.closest(".photo-open")) ||
+        e.target.closest("label") || e.target === checkbox) return;
 
     isLongPress = false;
     longPressTimer = setTimeout(function () {
@@ -1071,7 +1461,7 @@
   var touchDragThreshold = 10; // pixels
 
   fileList.addEventListener("touchstart", function (e) {
-    if (isLongPress) return; // Não inicia drag se foi long press
+    if (isLongPress || e.touches.length > 1) return; // Não inicia drag em gesto de pinça
 
     var card = e.target.closest(".file-card");
     if (!card) return;
@@ -1079,7 +1469,7 @@
     var checkbox = card.querySelector(".select-item");
     if (!checkbox) return;
 
-    // Não inicia drag se tocou em botão ou checkbox
+    // Não inicia drag se tocou em botão ou checkbox.
     if (e.target.closest("button") || e.target.closest("label") || e.target === checkbox) return;
 
     touchDragSource = {
@@ -1122,7 +1512,9 @@
       var folderCheckbox = folderCard && folderCard.querySelector(".select-item");
       if (crumbTarget || (folderCheckbox && folderCheckbox.dataset.kind === "folder")) {
         var targetPath = crumbTarget ? crumbTarget.dataset.dropPath : folderCheckbox.dataset.path;
-        var targetName = crumbTarget ? crumbTarget.textContent.trim() : folderCheckbox.dataset.name;
+        var targetName = crumbTarget
+          ? (crumbTarget.dataset.dropName || crumbTarget.textContent.trim() || "Início")
+          : folderCheckbox.dataset.name;
 
         // Determina itens a mover
         var itemsToMove = selectedItems.size > 0 && checkbox.checked

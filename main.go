@@ -31,9 +31,14 @@ import (
 )
 
 const (
-	mediaDirectory = "media"
-	maxSearchHits  = 2000
-	statsTTL       = 30 * time.Second
+	mediaDirectory       = "media"
+	trashDirectory       = ".trash"
+	dataFilePath         = "data.json"
+	maxSearchHits        = 2000
+	statsTTL             = 30 * time.Second
+	recentWindow         = 7 * 24 * time.Hour
+	trashRetention       = 30 * 24 * time.Hour
+	trashCleanupInterval = time.Hour
 )
 
 var (
@@ -78,17 +83,22 @@ var (
 )
 
 type File struct {
-	Id          string
-	Name        string
-	ServerName  string // nome em disco: <uuid>__<nome>
-	Path        string // caminho relativo a media/, com "/" (ex.: "viagens/2024/uuid__foto.jpg")
-	Dir         string // pasta que contém o arquivo ("" = raiz)
-	Located     bool   // mostrar a localização (resultados de pesquisa)
-	Ext         string
-	Kind        string // "image", "video" ou "other"
-	MIMEType    string
-	Size        int64
-	CreatedDate time.Time
+	Id           string
+	Name         string
+	ServerName   string // nome em disco: <uuid>__<nome>
+	Path         string // caminho relativo a media/, com "/" (ex.: "viagens/2024/uuid__foto.jpg")
+	Dir          string // pasta que contém o arquivo ("" = raiz)
+	Located      bool   // mostrar a localização (resultados de pesquisa)
+	Ext          string
+	Kind         string // "image", "video" ou "other"
+	MIMEType     string
+	Size         int64
+	CreatedDate  time.Time
+	Starred      bool
+	Trashed      bool
+	TrashID      string
+	OriginalPath string
+	DeletedAt    time.Time
 }
 
 // URL é o endereço escapado do arquivo em /media/.
@@ -100,24 +110,33 @@ func (f File) SizeLabel() string { return formatBytes(f.Size) }
 
 func (f File) DateLabel() string { return f.CreatedDate.Local().Format("02/01/2006 15:04") }
 
+func (f File) TrashDateLabel() string { return f.DeletedAt.Local().Format("02/01/2006 15:04") }
+
 func (f File) Location() string { return locationLabel(f.Dir) }
 
 type Folder struct {
-	Name        string
-	Path        string
-	Dir         string
-	Located     bool
-	CreatedDate time.Time
+	Name         string
+	Path         string
+	Dir          string
+	Located      bool
+	CreatedDate  time.Time
+	Starred      bool
+	Trashed      bool
+	TrashID      string
+	OriginalPath string
+	DeletedAt    time.Time
 }
 
 func (f Folder) Location() string { return locationLabel(f.Dir) }
 
+func (f Folder) TrashDateLabel() string { return f.DeletedAt.Local().Format("02/01/2006 15:04") }
+
 func locationLabel(dir string) string {
 	if dir == "" {
-		return "Início"
+		return "Arquivos"
 	}
 
-	return "Início / " + strings.ReplaceAll(dir, "/", " / ")
+	return strings.ReplaceAll(dir, "/", " / ")
 }
 
 type Crumb struct {
@@ -155,6 +174,7 @@ type FileData struct {
 	Files   []File
 	Count   ViewCount
 	Stats   StorageStats
+	View    string
 	Path    string
 	Crumbs  []Crumb
 	Query   string
@@ -172,14 +192,62 @@ type SortOptions struct {
 type viewRequest struct {
 	Path  string
 	Query string
+	View  string
 	Opts  SortOptions
 }
+
+type emptyStateData struct {
+	Query string
+	View  string
+}
+
+type starredEntry struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id,omitempty"`
+	Path string `json:"path,omitempty"`
+}
+
+type persistentData struct {
+	Starred []starredEntry `json:"starred"`
+	Trash   []trashEntry   `json:"trash,omitempty"`
+}
+
+type trashEntry struct {
+	ID           string    `json:"id"`
+	Kind         string    `json:"kind"`
+	OriginalPath string    `json:"originalPath"`
+	TrashPath    string    `json:"trashPath"`
+	DeletedAt    time.Time `json:"deletedAt"`
+}
+
+type starRequest struct {
+	Kind    string `json:"kind"`
+	Path    string `json:"path"`
+	Starred bool   `json:"starred"`
+}
+
+type renameRequest struct {
+	Kind string `json:"kind"`
+	Path string `json:"path"`
+	Name string `json:"name"`
+}
+
+var persistentState = struct {
+	sync.RWMutex
+	starred map[string]starredEntry
+	trash   []trashEntry
+}{starred: make(map[string]starredEntry)}
 
 func main() {
 	if err := os.MkdirAll(mediaDirectory, 0755); err != nil {
 		log.Fatal(err)
 	}
 
+	if err := loadPersistentData(); err != nil {
+		log.Fatalf("unable to load %s: %v", dataFilePath, err)
+	}
+
+	cleanupExpiredTrash()
 	cleanupTemporaryFiles()
 
 	staticFS, err := fs.Sub(embeddedFiles, "web/static")
@@ -200,6 +268,10 @@ func main() {
 	mux.HandleFunc("/media/", mediaHandler)
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/upload", uploadHandler)
+	mux.HandleFunc("/star", starHandler)
+	mux.HandleFunc("/rename", renameHandler)
+	mux.HandleFunc("/trash/restore", restoreTrashHandler)
+	mux.HandleFunc("/trash", trashHandler)
 	mux.HandleFunc("/delete", deleteHandler)
 	mux.HandleFunc("/bulk-delete", bulkDeleteHandler)
 	mux.HandleFunc("/bulk-download", bulkDownloadHandler)
@@ -223,6 +295,7 @@ func main() {
 		syscall.SIGTERM,
 	)
 	defer stop()
+	go runTrashCleanup(ctx)
 
 	serverErrors := make(chan error, 1)
 
@@ -415,6 +488,705 @@ func requireMethod(w http.ResponseWriter, r *http.Request, methods ...string) bo
 	return false
 }
 
+func starredEntryKey(item starredEntry) string {
+	switch item.Kind {
+	case "file":
+		return "file:" + item.ID
+	case "folder":
+		return "folder:" + item.Path
+	default:
+		return ""
+	}
+}
+
+func readPersistentData(filename string) (persistentData, error) {
+	content, err := os.ReadFile(filename)
+	if errors.Is(err, os.ErrNotExist) {
+		return persistentData{}, nil
+	}
+	if err != nil {
+		return persistentData{}, err
+	}
+
+	var data persistentData
+	if err := json.Unmarshal(content, &data); err != nil {
+		return persistentData{}, fmt.Errorf("decode JSON: %w", err)
+	}
+
+	items := make(map[string]starredEntry, len(data.Starred))
+	for _, item := range data.Starred {
+		switch item.Kind {
+		case "file":
+			if !isUUID(item.ID) || item.Path != "" {
+				return persistentData{}, errors.New("invalid starred file entry")
+			}
+			item.ID = strings.ToLower(item.ID)
+		case "folder":
+			path, ok := cleanRelPath(item.Path)
+			if !ok || path == "" || path != item.Path || item.ID != "" {
+				return persistentData{}, errors.New("invalid starred folder entry")
+			}
+		default:
+			return persistentData{}, errors.New("invalid starred item kind")
+		}
+
+		items[starredEntryKey(item)] = item
+	}
+
+	data.Starred = make([]starredEntry, 0, len(items))
+	for _, item := range items {
+		data.Starred = append(data.Starred, item)
+	}
+	sort.Slice(data.Starred, func(i, j int) bool {
+		return starredEntryKey(data.Starred[i]) < starredEntryKey(data.Starred[j])
+	})
+
+	trashIDs := make(map[string]bool, len(data.Trash))
+	for _, item := range data.Trash {
+		originalPath, originalOK := cleanRelPath(item.OriginalPath)
+		trashItemPath := strings.TrimPrefix(item.TrashPath, trashDirectory+"/"+item.ID+"/")
+		trashItemPath, trashPathOK := cleanRelPath(trashItemPath)
+		if !isUUID(item.ID) ||
+			(item.Kind != "file" && item.Kind != "folder") ||
+			!originalOK || originalPath == "" || originalPath != item.OriginalPath ||
+			!trashPathOK || trashItemPath == "" ||
+			!strings.HasPrefix(item.TrashPath, trashDirectory+"/"+item.ID+"/") ||
+			item.DeletedAt.IsZero() || trashIDs[item.ID] {
+			return persistentData{}, errors.New("invalid trash entry")
+		}
+		trashIDs[item.ID] = true
+	}
+
+	return data, nil
+}
+
+func loadPersistentData() error {
+	items, err := readPersistentData(dataFilePath)
+	if err != nil {
+		return err
+	}
+
+	starred := make(map[string]starredEntry, len(items.Starred))
+	for _, item := range items.Starred {
+		starred[starredEntryKey(item)] = item
+	}
+
+	persistentState.Lock()
+	persistentState.starred = starred
+	persistentState.trash = items.Trash
+	persistentState.Unlock()
+
+	return nil
+}
+
+func savePersistentData(filename string, data persistentData) error {
+	sort.Slice(data.Starred, func(i, j int) bool {
+		return starredEntryKey(data.Starred[i]) < starredEntryKey(data.Starred[j])
+	})
+	sort.Slice(data.Trash, func(i, j int) bool {
+		return data.Trash[i].ID < data.Trash[j].ID
+	})
+
+	content, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	content = append(content, '\n')
+
+	temp, err := os.CreateTemp(filepath.Dir(filename), ".data-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+
+	if _, err := temp.Write(content); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+
+	return os.Rename(tempPath, filename)
+}
+
+func persistentDataLocked() persistentData {
+	data := persistentData{
+		Starred: make([]starredEntry, 0, len(persistentState.starred)),
+		Trash:   append([]trashEntry(nil), persistentState.trash...),
+	}
+	for _, item := range persistentState.starred {
+		data.Starred = append(data.Starred, item)
+	}
+	return data
+}
+
+func savePersistentDataLocked() error {
+	return savePersistentData(dataFilePath, persistentDataLocked())
+}
+
+func removeStarredEntries(matches func(starredEntry) bool) {
+	persistentState.Lock()
+	defer persistentState.Unlock()
+
+	previous := make(map[string]starredEntry, len(persistentState.starred))
+	for key, item := range persistentState.starred {
+		previous[key] = item
+	}
+
+	changed := false
+	for key, item := range persistentState.starred {
+		if matches(item) {
+			delete(persistentState.starred, key)
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+
+	if err := savePersistentDataLocked(); err != nil {
+		persistentState.starred = previous
+		log.Printf("star data save error: %v", err)
+	}
+}
+
+func rebaseFolderMetadata(oldPath, newPath string) error {
+	persistentState.Lock()
+	defer persistentState.Unlock()
+
+	updated := make(map[string]starredEntry, len(persistentState.starred))
+	for key, item := range persistentState.starred {
+		updated[key] = item
+	}
+
+	changed := false
+	for key, item := range updated {
+		if item.Kind != "folder" || (item.Path != oldPath && !strings.HasPrefix(item.Path, oldPath+"/")) {
+			continue
+		}
+		delete(updated, key)
+		item.Path = newPath + strings.TrimPrefix(item.Path, oldPath)
+		updated[starredEntryKey(item)] = item
+		changed = true
+	}
+
+	updatedTrash := append([]trashEntry(nil), persistentState.trash...)
+	for i := range updatedTrash {
+		path := updatedTrash[i].OriginalPath
+		if path == oldPath || strings.HasPrefix(path, oldPath+"/") {
+			updatedTrash[i].OriginalPath = newPath + strings.TrimPrefix(path, oldPath)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+
+	previous := persistentState.starred
+	previousTrash := persistentState.trash
+	persistentState.starred = updated
+	persistentState.trash = updatedTrash
+	if err := savePersistentDataLocked(); err != nil {
+		persistentState.starred = previous
+		persistentState.trash = previousTrash
+		return err
+	}
+	return nil
+}
+
+func starHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+
+	var req starRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	var item starredEntry
+	switch req.Kind {
+	case "file":
+		file, err := findFileByReference(req.Path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				http.NotFound(w, r)
+				return
+			}
+			log.Printf("star file lookup error: %v", err)
+			http.Error(w, "unable to find file", http.StatusInternalServerError)
+			return
+		}
+		item = starredEntry{Kind: "file", ID: file.Id}
+	case "folder":
+		path, ok := cleanRelPath(req.Path)
+		if !ok || path == "" {
+			http.Error(w, "invalid folder path", http.StatusBadRequest)
+			return
+		}
+		info, err := os.Lstat(fullPath(path))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				http.NotFound(w, r)
+				return
+			}
+			log.Printf("star folder lookup error: %v", err)
+			http.Error(w, "unable to find folder", http.StatusInternalServerError)
+			return
+		}
+		if !info.IsDir() {
+			http.NotFound(w, r)
+			return
+		}
+		item = starredEntry{Kind: "folder", Path: path}
+	default:
+		http.Error(w, "invalid item kind", http.StatusBadRequest)
+		return
+	}
+
+	key := starredEntryKey(item)
+	persistentState.Lock()
+	previous, existed := persistentState.starred[key]
+	if req.Starred {
+		persistentState.starred[key] = item
+	} else {
+		delete(persistentState.starred, key)
+	}
+	if err := savePersistentDataLocked(); err != nil {
+		if existed {
+			persistentState.starred[key] = previous
+		} else {
+			delete(persistentState.starred, key)
+		}
+		persistentState.Unlock()
+		log.Printf("star data save error: %v", err)
+		http.Error(w, "unable to save starred items", http.StatusInternalServerError)
+		return
+	}
+	persistentState.Unlock()
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(map[string]bool{"starred": req.Starred}); err != nil {
+		log.Printf("star response error: %v", err)
+	}
+}
+
+func renameHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	var req renameRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if strings.ContainsAny(req.Name, `/\`) {
+		http.Error(w, "item name cannot contain path separators", http.StatusBadRequest)
+		return
+	}
+
+	var oldPath, newPath string
+	switch req.Kind {
+	case "file":
+		file, err := findFileByReference(req.Path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				http.NotFound(w, r)
+				return
+			}
+			log.Printf("rename file lookup error: %v", err)
+			http.Error(w, "unable to find file", http.StatusInternalServerError)
+			return
+		}
+		name := sanitizeFilename(req.Name)
+		if !validSegment(name) || !validSegment(file.Id+"__"+name) {
+			http.Error(w, "invalid file name", http.StatusBadRequest)
+			return
+		}
+		oldPath = file.Path
+		newPath = pathpkg.Join(parentRel(oldPath), file.Id+"__"+name)
+	case "folder":
+		var ok bool
+		oldPath, ok = cleanRelPath(req.Path)
+		if !ok || oldPath == "" {
+			http.Error(w, "invalid folder path", http.StatusBadRequest)
+			return
+		}
+		name, ok := sanitizeFolderName(req.Name)
+		if !ok {
+			http.Error(w, "invalid folder name", http.StatusBadRequest)
+			return
+		}
+		newPath = pathpkg.Join(parentRel(oldPath), name)
+		info, err := os.Lstat(fullPath(oldPath))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				http.NotFound(w, r)
+				return
+			}
+			log.Printf("rename folder lookup error: %v", err)
+			http.Error(w, "unable to find folder", http.StatusInternalServerError)
+			return
+		}
+		if !info.IsDir() {
+			http.NotFound(w, r)
+			return
+		}
+	default:
+		http.Error(w, "invalid item kind", http.StatusBadRequest)
+		return
+	}
+
+	if oldPath == newPath {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if _, err := os.Lstat(fullPath(newPath)); err == nil {
+		http.Error(w, "an item with that name already exists", http.StatusConflict)
+		return
+	} else if !errors.Is(err, os.ErrNotExist) {
+		log.Printf("rename destination lookup error: %v", err)
+		http.Error(w, "unable to rename item", http.StatusInternalServerError)
+		return
+	}
+	if err := os.Rename(fullPath(oldPath), fullPath(newPath)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
+		log.Printf("rename error: %v", err)
+		http.Error(w, "unable to rename item", http.StatusInternalServerError)
+		return
+	}
+	if req.Kind == "folder" {
+		if err := rebaseFolderMetadata(oldPath, newPath); err != nil {
+			if rollbackErr := os.Rename(fullPath(newPath), fullPath(oldPath)); rollbackErr != nil {
+				log.Printf("folder rename rollback error: %v", rollbackErr)
+			}
+			log.Printf("folder metadata update error: %v", err)
+			http.Error(w, "unable to update folder metadata", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	invalidateStats()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func moveToTrash(kind, reference string) error {
+	var originalPath string
+	switch kind {
+	case "file":
+		file, err := findFileByReference(reference)
+		if err != nil {
+			return err
+		}
+		originalPath = file.Path
+	case "folder":
+		rel, ok := cleanRelPath(reference)
+		if !ok || rel == "" {
+			return os.ErrNotExist
+		}
+		info, err := os.Lstat(fullPath(rel))
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return os.ErrNotExist
+		}
+		originalPath = rel
+	default:
+		return errors.New("invalid item kind")
+	}
+
+	trashRoot := fullPath(trashDirectory)
+	if err := os.MkdirAll(trashRoot, 0755); err != nil {
+		return err
+	}
+	source := fullPath(originalPath)
+	for attempts := 0; attempts < 3; attempts++ {
+		id, err := generateUUID()
+		if err != nil {
+			return err
+		}
+		bucketPath := pathpkg.Join(trashDirectory, id)
+		if err := os.Mkdir(fullPath(bucketPath), 0755); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return err
+		}
+
+		trashPath := pathpkg.Join(bucketPath, pathpkg.Base(originalPath))
+		if err := os.Rename(source, fullPath(trashPath)); err != nil {
+			_ = os.Remove(fullPath(bucketPath))
+			return err
+		}
+
+		item := trashEntry{
+			ID:           id,
+			Kind:         kind,
+			OriginalPath: originalPath,
+			TrashPath:    trashPath,
+			DeletedAt:    time.Now().UTC(),
+		}
+		persistentState.Lock()
+		previous := append([]trashEntry(nil), persistentState.trash...)
+		persistentState.trash = append(persistentState.trash, item)
+		if err := savePersistentDataLocked(); err != nil {
+			persistentState.trash = previous
+			persistentState.Unlock()
+			if rollbackErr := os.Rename(fullPath(trashPath), source); rollbackErr != nil {
+				log.Printf("trash rollback error: %v", rollbackErr)
+			}
+			_ = os.Remove(fullPath(bucketPath))
+			return err
+		}
+		persistentState.Unlock()
+		return nil
+	}
+	return errors.New("unable to allocate trash item ID")
+}
+
+func restoreTrashItem(id string) error {
+	if !isUUID(id) {
+		return os.ErrNotExist
+	}
+	id = strings.ToLower(id)
+
+	persistentState.Lock()
+	defer persistentState.Unlock()
+
+	index := -1
+	var item trashEntry
+	for i, candidate := range persistentState.trash {
+		if candidate.ID == id {
+			index, item = i, candidate
+			break
+		}
+	}
+	if index == -1 {
+		return os.ErrNotExist
+	}
+
+	destination := fullPath(item.OriginalPath)
+	if _, err := os.Lstat(destination); err == nil {
+		return os.ErrExist
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	parent := parentRel(item.OriginalPath)
+	parentInfo, err := os.Stat(fullPath(parent))
+	if err != nil {
+		return err
+	}
+	if !parentInfo.IsDir() {
+		return os.ErrNotExist
+	}
+
+	source := fullPath(item.TrashPath)
+	if err := os.Rename(source, destination); err != nil {
+		return err
+	}
+	previous := append([]trashEntry(nil), persistentState.trash...)
+	persistentState.trash = append(persistentState.trash[:index], persistentState.trash[index+1:]...)
+	if err := savePersistentDataLocked(); err != nil {
+		persistentState.trash = previous
+		if rollbackErr := os.Rename(destination, source); rollbackErr != nil {
+			log.Printf("trash restore rollback error: %v", rollbackErr)
+		}
+		return err
+	}
+	_ = os.Remove(fullPath(pathpkg.Dir(item.TrashPath)))
+	return nil
+}
+
+func permanentlyDeleteTrashItem(id string) error {
+	if !isUUID(id) {
+		return os.ErrNotExist
+	}
+	id = strings.ToLower(id)
+
+	persistentState.Lock()
+	index := -1
+	var item trashEntry
+	for i, candidate := range persistentState.trash {
+		if candidate.ID == id {
+			index, item = i, candidate
+			break
+		}
+	}
+	if index == -1 {
+		persistentState.Unlock()
+		return os.ErrNotExist
+	}
+	fileIDs := trashFileIDs(item)
+	if err := os.RemoveAll(fullPath(item.TrashPath)); err != nil {
+		persistentState.Unlock()
+		return err
+	}
+	_ = os.Remove(fullPath(pathpkg.Dir(item.TrashPath)))
+	previous := append([]trashEntry(nil), persistentState.trash...)
+	persistentState.trash = append(persistentState.trash[:index], persistentState.trash[index+1:]...)
+	if err := savePersistentDataLocked(); err != nil {
+		persistentState.trash = previous
+		persistentState.Unlock()
+		return err
+	}
+	persistentState.Unlock()
+
+	clearStarredForTrashItem(item, fileIDs)
+	return nil
+}
+
+func trashFileIDs(item trashEntry) map[string]bool {
+	ids := make(map[string]bool)
+	if item.Kind == "file" {
+		if id, _, ok := parseStoredFilename(pathpkg.Base(item.TrashPath)); ok {
+			ids[id] = true
+		}
+		return ids
+	}
+	err := filepath.WalkDir(fullPath(item.TrashPath), func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if id, _, ok := parseStoredFilename(entry.Name()); ok {
+			ids[id] = true
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("trash star lookup error (%s): %v", item.ID, err)
+	}
+	return ids
+}
+
+func clearStarredForTrashItem(item trashEntry, fileIDs map[string]bool) {
+	removeStarredEntries(func(starred starredEntry) bool {
+		switch starred.Kind {
+		case "file":
+			return fileIDs[starred.ID]
+		case "folder":
+			return item.Kind == "folder" &&
+				(starred.Path == item.OriginalPath || strings.HasPrefix(starred.Path, item.OriginalPath+"/"))
+		default:
+			return false
+		}
+	})
+}
+
+func cleanupExpiredTrash() {
+	now := time.Now()
+	persistentState.Lock()
+	previous := append([]trashEntry(nil), persistentState.trash...)
+	kept := make([]trashEntry, 0, len(previous))
+	type expiredItem struct {
+		entry   trashEntry
+		fileIDs map[string]bool
+	}
+	expired := make([]expiredItem, 0)
+	for _, item := range previous {
+		if now.Before(item.DeletedAt.Add(trashRetention)) {
+			kept = append(kept, item)
+			continue
+		}
+		fileIDs := trashFileIDs(item)
+		if err := os.RemoveAll(fullPath(item.TrashPath)); err != nil {
+			log.Printf("expired trash item removal error (%s): %v", item.ID, err)
+			kept = append(kept, item)
+			continue
+		}
+		_ = os.Remove(fullPath(pathpkg.Dir(item.TrashPath)))
+		expired = append(expired, expiredItem{entry: item, fileIDs: fileIDs})
+	}
+	if len(expired) == 0 {
+		persistentState.Unlock()
+		return
+	}
+	persistentState.trash = kept
+	if err := savePersistentDataLocked(); err != nil {
+		persistentState.trash = previous
+		persistentState.Unlock()
+		log.Printf("expired trash metadata save error: %v", err)
+		return
+	}
+	persistentState.Unlock()
+
+	for _, item := range expired {
+		clearStarredForTrashItem(item.entry, item.fileIDs)
+	}
+}
+
+func runTrashCleanup(ctx context.Context) {
+	ticker := time.NewTicker(trashCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cleanupExpiredTrash()
+		}
+	}
+}
+
+func restoreTrashHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	if err := restoreTrashItem(r.URL.Query().Get("id")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
+		if errors.Is(err, os.ErrExist) {
+			http.Error(w, "an item with that name already exists", http.StatusConflict)
+			return
+		}
+		log.Printf("trash restore error: %v", err)
+		http.Error(w, "unable to restore item", http.StatusInternalServerError)
+		return
+	}
+	invalidateStats()
+	renderOOBOnly(w, r)
+}
+
+func trashHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodDelete) {
+		return
+	}
+	if err := permanentlyDeleteTrashItem(r.URL.Query().Get("id")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
+		log.Printf("permanent trash deletion error: %v", err)
+		http.Error(w, "unable to permanently delete item", http.StatusInternalServerError)
+		return
+	}
+	invalidateStats()
+	renderOOBOnly(w, r)
+}
+
 /* ------------------------------------------------------------------ */
 /* Pedido de visualização, ordenação e pesquisa                       */
 /* ------------------------------------------------------------------ */
@@ -464,9 +1236,15 @@ func viewRequestFrom(r *http.Request) (viewRequest, bool) {
 		search = string(runes[:100])
 	}
 
+	view := query.Get("view")
+	if view != "" && view != "recent" && view != "starred" && view != "trash" && view != "photos" && view != "storage" {
+		return viewRequest{}, false
+	}
+
 	return viewRequest{
 		Path:  path,
 		Query: search,
+		View:  view,
 		Opts:  sortOptionsFromRequest(r),
 	}, true
 }
@@ -793,6 +1571,203 @@ func walkFiles(visit func(File) bool) error {
 	})
 }
 
+func filterRecentFiles(files []File, now time.Time) []File {
+	cutoff := now.Add(-recentWindow)
+	recent := make([]File, 0)
+	for _, file := range files {
+		if !file.CreatedDate.After(cutoff) || file.CreatedDate.After(now) {
+			continue
+		}
+		recent = append(recent, file)
+	}
+
+	sort.SliceStable(recent, func(i, j int) bool {
+		return recent[i].CreatedDate.After(recent[j].CreatedDate)
+	})
+	return recent
+}
+
+func recentFiles(now time.Time) ([]File, error) {
+	files := make([]File, 0)
+	if err := walkFiles(func(file File) bool {
+		files = append(files, file)
+		return false
+	}); err != nil {
+		return nil, err
+	}
+	return filterRecentFiles(files, now), nil
+}
+
+func photoFiles() ([]File, error) {
+	files := make([]File, 0)
+	if err := walkFiles(func(file File) bool {
+		if file.Kind == "image" {
+			files = append(files, file)
+		}
+		return false
+	}); err != nil {
+		return nil, err
+	}
+	sortFiles(files, SortOptions{By: "date", Order: "desc"})
+	return files, nil
+}
+
+func starredSnapshot() map[string]starredEntry {
+	persistentState.RLock()
+	defer persistentState.RUnlock()
+
+	items := make(map[string]starredEntry, len(persistentState.starred))
+	for key, item := range persistentState.starred {
+		items[key] = item
+	}
+	return items
+}
+
+func annotateStarred(folders []Folder, files []File) {
+	items := starredSnapshot()
+	for i := range folders {
+		_, folders[i].Starred = items[starredEntryKey(starredEntry{
+			Kind: "folder",
+			Path: folders[i].Path,
+		})]
+	}
+	for i := range files {
+		_, files[i].Starred = items[starredEntryKey(starredEntry{
+			Kind: "file",
+			ID:   files[i].Id,
+		})]
+	}
+}
+
+func starredItems() ([]Folder, []File, error) {
+	items := starredSnapshot()
+	fileIDs := make(map[string]bool)
+	folderPaths := make([]string, 0)
+	for _, item := range items {
+		switch item.Kind {
+		case "file":
+			fileIDs[item.ID] = true
+		case "folder":
+			folderPaths = append(folderPaths, item.Path)
+		}
+	}
+
+	folders := make([]Folder, 0, len(folderPaths))
+	for _, path := range folderPaths {
+		info, err := os.Lstat(fullPath(path))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if !info.IsDir() {
+			continue
+		}
+
+		folders = append(folders, Folder{
+			Name:        pathpkg.Base(path),
+			Path:        path,
+			Dir:         parentRel(path),
+			Located:     true,
+			CreatedDate: info.ModTime(),
+			Starred:     true,
+		})
+	}
+
+	files := make([]File, 0, len(fileIDs))
+	if err := walkFiles(func(file File) bool {
+		if fileIDs[file.Id] {
+			file.Located = true
+			file.Starred = true
+			files = append(files, file)
+		}
+		return false
+	}); err != nil {
+		return nil, nil, err
+	}
+
+	return folders, files, nil
+}
+
+func trashedItems() ([]Folder, []File, error) {
+	persistentState.RLock()
+	items := append([]trashEntry(nil), persistentState.trash...)
+	persistentState.RUnlock()
+
+	folders := make([]Folder, 0)
+	files := make([]File, 0)
+	for _, item := range items {
+		info, err := os.Lstat(fullPath(item.TrashPath))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if item.Kind == "folder" {
+			if !info.IsDir() {
+				continue
+			}
+			folders = append(folders, Folder{
+				Name:         pathpkg.Base(item.OriginalPath),
+				Path:         item.OriginalPath,
+				Dir:          parentRel(item.OriginalPath),
+				Located:      true,
+				CreatedDate:  info.ModTime(),
+				Trashed:      true,
+				TrashID:      item.ID,
+				OriginalPath: item.OriginalPath,
+				DeletedAt:    item.DeletedAt,
+			})
+			continue
+		}
+
+		file, ok := fileFromInfo(parentRel(item.TrashPath), info)
+		if !ok {
+			continue
+		}
+		file.Path = item.OriginalPath
+		file.Dir = parentRel(item.OriginalPath)
+		file.Located = true
+		file.Trashed = true
+		file.TrashID = item.ID
+		file.OriginalPath = item.OriginalPath
+		file.DeletedAt = item.DeletedAt
+		files = append(files, file)
+	}
+
+	sort.Slice(folders, func(i, j int) bool {
+		return folders[i].DeletedAt.After(folders[j].DeletedAt)
+	})
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].DeletedAt.After(files[j].DeletedAt)
+	})
+	return folders, files, nil
+}
+
+func filterViewByQuery(folders []Folder, files []File, query string) ([]Folder, []File) {
+	if query == "" {
+		return folders, files
+	}
+
+	needle := foldString(query)
+	filteredFolders := make([]Folder, 0, len(folders))
+	for _, folder := range folders {
+		if strings.Contains(foldString(folder.Name), needle) {
+			filteredFolders = append(filteredFolders, folder)
+		}
+	}
+
+	filteredFiles := make([]File, 0, len(files))
+	for _, file := range files {
+		if strings.Contains(foldString(file.Name), needle) {
+			filteredFiles = append(filteredFiles, file)
+		}
+	}
+	return filteredFolders, filteredFiles
+}
+
 func loadView(request viewRequest) (View, error) {
 	var (
 		folders []Folder
@@ -800,18 +1775,51 @@ func loadView(request viewRequest) (View, error) {
 		err     error
 	)
 
-	if request.Query != "" {
-		folders, files, err = searchLibrary(request.Query)
-	} else {
-		folders, files, err = listDir(request.Path)
+	switch request.View {
+	case "storage":
+		// A seção de armazenamento não lista arquivos.
+	case "recent":
+		files, err = recentFiles(time.Now())
+	case "photos":
+		files, err = photoFiles()
+	case "starred":
+		folders, files, err = starredItems()
+	case "trash":
+		folders, files, err = trashedItems()
+	default:
+		if request.Query != "" {
+			folders, files, err = searchLibrary(request.Query)
+		} else {
+			folders, files, err = listDir(request.Path)
+		}
 	}
 
 	if err != nil {
 		return View{}, err
 	}
 
-	sortFolders(folders, request.Opts)
-	sortFiles(files, request.Opts)
+	if request.View != "" && request.Query != "" {
+		folders, files = filterViewByQuery(folders, files, request.Query)
+	}
+
+	if request.View != "trash" {
+		annotateStarred(folders, files)
+	}
+	if request.View == "trash" {
+		sort.Slice(folders, func(i, j int) bool {
+			return folders[i].DeletedAt.After(folders[j].DeletedAt)
+		})
+		sort.Slice(files, func(i, j int) bool {
+			return files[i].DeletedAt.After(files[j].DeletedAt)
+		})
+	} else {
+		sortFolders(folders, request.Opts)
+	}
+	if request.View == "recent" || request.View == "photos" {
+		sortFiles(files, SortOptions{By: "date", Order: "desc"})
+	} else if request.View != "trash" {
+		sortFiles(files, request.Opts)
+	}
 
 	return View{
 		Folders: folders,
@@ -959,14 +1967,9 @@ func viewError(w http.ResponseWriter, r *http.Request, err error) {
 	http.Error(w, "unable to list files", http.StatusInternalServerError)
 }
 
-// writeOOB escreve os fragmentos "out-of-band" (contador e armazenamento) que
-// o HTMX aplica em elementos fora do alvo principal da requisição.
+// writeOOB escreve o contador que o HTMX aplica fora do alvo principal.
 func writeOOB(output *bytes.Buffer, count ViewCount) error {
-	if err := tmpl.ExecuteTemplate(output, "file-count", count); err != nil {
-		return err
-	}
-
-	return tmpl.ExecuteTemplate(output, "storage-stats", buildStats())
+	return tmpl.ExecuteTemplate(output, "file-count", count)
 }
 
 func renderPage(w http.ResponseWriter, r *http.Request) {
@@ -989,6 +1992,7 @@ func renderPage(w http.ResponseWriter, r *http.Request) {
 		Files:   view.Files,
 		Count:   view.Count,
 		Stats:   buildStats(),
+		View:    request.View,
 		Path:    request.Path,
 		Crumbs:  buildCrumbs(request.Path),
 		Query:   request.Query,
@@ -1027,8 +2031,12 @@ func renderList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	fileTemplate := "file-card"
+	if request.View == "photos" {
+		fileTemplate = "photo-card"
+	}
 	for _, file := range view.Files {
-		if err := tmpl.ExecuteTemplate(&output, "file-card", file); err != nil {
+		if err := tmpl.ExecuteTemplate(&output, fileTemplate, file); err != nil {
 			log.Printf("file template execution error: %v", err)
 			http.Error(w, "unable to render files", http.StatusInternalServerError)
 			return
@@ -1036,7 +2044,10 @@ func renderList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(view.Folders) == 0 && len(view.Files) == 0 {
-		if err := tmpl.ExecuteTemplate(&output, "empty-state", request.Query); err != nil {
+		if err := tmpl.ExecuteTemplate(&output, "empty-state", emptyStateData{
+			Query: request.Query,
+			View:  request.View,
+		}); err != nil {
 			log.Printf("empty template execution error: %v", err)
 			http.Error(w, "unable to render files", http.StatusInternalServerError)
 			return
@@ -1148,7 +2159,13 @@ func removeFileByReference(reference string) error {
 		return err
 	}
 
-	return os.Remove(fullPath(file.Path))
+	if err := os.Remove(fullPath(file.Path)); err != nil {
+		return err
+	}
+	removeStarredEntries(func(item starredEntry) bool {
+		return item.Kind == "file" && item.ID == file.Id
+	})
+	return nil
 }
 
 func removeFolder(raw string) error {
@@ -1166,7 +2183,14 @@ func removeFolder(raw string) error {
 		return os.ErrNotExist
 	}
 
-	return os.RemoveAll(fullPath(rel))
+	if err := os.RemoveAll(fullPath(rel)); err != nil {
+		return err
+	}
+	removeStarredEntries(func(item starredEntry) bool {
+		return item.Kind == "folder" &&
+			(item.Path == rel || strings.HasPrefix(item.Path, rel+"/"))
+	})
+	return nil
 }
 
 /* ------------------------------------------------------------------ */
@@ -1518,14 +2542,14 @@ func fileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodDelete {
-		if err := removeFileByReference(id); err != nil {
+		if err := moveToTrash("file", id); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				http.NotFound(w, r)
 				return
 			}
 
-			log.Printf("file deletion error: %v", err)
-			http.Error(w, "unable to delete file", http.StatusInternalServerError)
+			log.Printf("file trash error: %v", err)
+			http.Error(w, "unable to move file to trash", http.StatusInternalServerError)
 			return
 		}
 
@@ -1549,9 +2573,7 @@ func fileHandler(w http.ResponseWriter, r *http.Request) {
 	serveStoredFile(w, r, file, true)
 }
 
-// deleteHandler remove um arquivo (?file=<caminho>) ou uma pasta com todo o seu
-// conteúdo (?folder=<caminho>). Os demais parâmetros (path, q, sort, order)
-// descrevem a visualização atual, usada para atualizar o contador.
+// deleteHandler move um arquivo (?file=<caminho>) ou uma pasta (?folder=<caminho>) para a lixeira.
 func deleteHandler(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodDelete) {
 		return
@@ -1563,9 +2585,9 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case query.Get("folder") != "":
-		err = removeFolder(query.Get("folder"))
+		err = moveToTrash("folder", query.Get("folder"))
 	case query.Get("file") != "":
-		err = removeFileByReference(query.Get("file"))
+		err = moveToTrash("file", query.Get("file"))
 	default:
 		http.Error(w, "missing file or folder", http.StatusBadRequest)
 		return
@@ -1577,8 +2599,8 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("deletion error: %v", err)
-		http.Error(w, "unable to delete", http.StatusInternalServerError)
+		log.Printf("trash error: %v", err)
+		http.Error(w, "unable to move item to trash", http.StatusInternalServerError)
 		return
 	}
 
@@ -1597,7 +2619,7 @@ type BulkItem struct {
 	Path string `json:"path"`
 }
 
-// bulkDeleteHandler remove múltiplos arquivos e/ou pastas em uma única requisição.
+// bulkDeleteHandler move múltiplos arquivos e/ou pastas para a lixeira.
 func bulkDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -1615,13 +2637,27 @@ func bulkDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var firstErr error
-	for _, item := range req.Items {
+	items := append([]BulkItem(nil), req.Items...)
+	itemRank := func(kind string) int {
+		switch kind {
+		case "file":
+			return 0
+		case "folder":
+			return 1
+		default:
+			return 2
+		}
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return itemRank(items[i].Kind) < itemRank(items[j].Kind)
+	})
+	for _, item := range items {
 		var err error
 		switch item.Kind {
 		case "file":
-			err = removeFileByReference(item.Path)
+			err = moveToTrash("file", item.Path)
 		case "folder":
-			err = removeFolder(item.Path)
+			err = moveToTrash("folder", item.Path)
 		default:
 			err = fmt.Errorf("invalid item kind: %s", item.Kind)
 		}
@@ -1897,7 +2933,19 @@ func moveFolder(folderPath, targetDir string) error {
 	}
 
 	// Move a pasta
-	return os.Rename(src, dst)
+	if err := os.Rename(src, dst); err != nil {
+		return err
+	}
+
+	newPath := joinRel(targetDir, filepath.Base(rel))
+	if err := rebaseFolderMetadata(rel, newPath); err != nil {
+		if rollbackErr := os.Rename(dst, src); rollbackErr != nil {
+			log.Printf("folder move rollback error: %v", rollbackErr)
+		}
+		return fmt.Errorf("update folder metadata after move: %w", err)
+	}
+
+	return nil
 }
 
 func mediaHandler(w http.ResponseWriter, r *http.Request) {
@@ -1996,7 +3044,13 @@ func cleanupTemporaryFiles() {
 			return err
 		}
 
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), ".upload-") {
+		if entry.IsDir() {
+			if filepath.Clean(path) == filepath.Clean(fullPath(trashDirectory)) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasPrefix(entry.Name(), ".upload-") {
 			return nil
 		}
 
