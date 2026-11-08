@@ -784,6 +784,82 @@
     return items;
   }
 
+  var selectionRectangle = document.createElement("div");
+  selectionRectangle.className = "selection-rectangle";
+  selectionRectangle.hidden = true;
+  document.body.appendChild(selectionRectangle);
+
+  var selectionDrag = null;
+
+  var libraryView = $("library-view");
+  libraryView.addEventListener("pointerdown", function (e) {
+    if (e.pointerType !== "mouse" || e.button !== 0 ||
+        (e.target !== fileList && e.target !== libraryView)) return;
+
+    var additive = e.ctrlKey || e.metaKey;
+    var initialSelection = new Set(selectedItems);
+    if (!additive) {
+      clearSelection();
+      initialSelection.clear();
+    }
+
+    selectionDrag = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      additive: additive,
+      initialSelection: initialSelection,
+      active: false,
+    };
+  });
+
+  window.addEventListener("pointermove", function (e) {
+    if (!selectionDrag || e.pointerId !== selectionDrag.pointerId) return;
+
+    var left = Math.min(selectionDrag.startX, e.clientX);
+    var top = Math.min(selectionDrag.startY, e.clientY);
+    var right = Math.max(selectionDrag.startX, e.clientX);
+    var bottom = Math.max(selectionDrag.startY, e.clientY);
+    if (!selectionDrag.active &&
+        Math.hypot(e.clientX - selectionDrag.startX, e.clientY - selectionDrag.startY) < 4) return;
+
+    selectionDrag.active = true;
+    e.preventDefault();
+    selectionRectangle.hidden = false;
+    selectionRectangle.style.left = left + "px";
+    selectionRectangle.style.top = top + "px";
+    selectionRectangle.style.width = right - left + "px";
+    selectionRectangle.style.height = bottom - top + "px";
+
+    fileList.querySelectorAll(".file-card").forEach(function (card) {
+      var checkbox = card.querySelector(".select-item");
+      if (!checkbox) return;
+
+      var cardBounds = card.getBoundingClientRect();
+      var intersects = cardBounds.left <= right &&
+        cardBounds.right >= left &&
+        cardBounds.top <= bottom &&
+        cardBounds.bottom >= top;
+      var initiallySelected = selectionDrag.additive &&
+        selectionDrag.initialSelection.has(getItemKey(checkbox));
+      if (intersects || initiallySelected) {
+        selectItem(checkbox);
+      } else {
+        deselectItem(checkbox);
+      }
+    });
+    updateBulkToolbar();
+  });
+
+  function finishSelectionDrag(e) {
+    if (!selectionDrag || (e && e.pointerId !== selectionDrag.pointerId)) return;
+    selectionDrag = null;
+    selectionRectangle.hidden = true;
+  }
+
+  window.addEventListener("pointerup", finishSelectionDrag);
+  window.addEventListener("pointercancel", finishSelectionDrag);
+
   // Delegação de eventos para checkboxes
   fileList.addEventListener("change", function (e) {
     if (e.target.matches(".select-item")) {
