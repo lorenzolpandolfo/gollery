@@ -1409,6 +1409,10 @@
     }
     touchSelectionActive = false;
     if (touchDragSource) touchDragSource.card.classList.remove("dragging");
+    if (touchDragDelayTimer) {
+      clearTimeout(touchDragDelayTimer);
+      touchDragDelayTimer = null;
+    }
     clearTouchDragPreview();
     touchDragSource = null;
   }, { passive: true });
@@ -1736,9 +1740,11 @@
   var touchDragSource = null;
   var touchDragOverFolder = null;
   var touchDragPreview = null;
+  var touchDragDelayTimer = null;
   var touchDragStartX = 0;
   var touchDragStartY = 0;
   var touchDragThreshold = 10; // pixels
+  var touchDragDelay = 1000; // Na lista, exige um toque parado antes de arrastar.
 
   function clearTouchDragPreview() {
     if (touchDragPreview) {
@@ -1820,13 +1826,28 @@
     // Não inicia drag se tocou em botão ou checkbox.
     if (e.target.closest("button") || e.target.closest("label") || e.target === checkbox) return;
 
+    if (touchDragDelayTimer) {
+      clearTimeout(touchDragDelayTimer);
+      touchDragDelayTimer = null;
+    }
+
+    var requiresLongPress = root.dataset.view === "list";
     touchDragSource = {
       card: card,
       checkbox: checkbox,
       startX: e.touches[0].clientX,
       startY: e.touches[0].clientY,
       dragging: false,
+      dragReady: !requiresLongPress,
     };
+
+    if (requiresLongPress) {
+      var source = touchDragSource;
+      touchDragDelayTimer = setTimeout(function () {
+        if (touchDragSource === source) source.dragReady = true;
+        touchDragDelayTimer = null;
+      }, touchDragDelay);
+    }
   }, { passive: true });
 
   fileList.addEventListener("touchmove", function (e) {
@@ -1835,6 +1856,15 @@
     var deltaX = e.touches[0].clientX - touchDragSource.startX;
     var deltaY = e.touches[0].clientY - touchDragSource.startY;
     var distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+
+    if (!touchDragSource.dragReady && distance > 4) {
+      if (touchDragDelayTimer) {
+        clearTimeout(touchDragDelayTimer);
+        touchDragDelayTimer = null;
+      }
+      touchDragSource = null;
+      return;
+    }
 
     if (distance > touchDragThreshold) {
       if (!touchDragSource.dragging) {
@@ -1853,10 +1883,19 @@
 
     var card = touchDragSource.card;
     var checkbox = touchDragSource.checkbox;
+    var wasDragging = touchDragSource.dragging;
+
+    if (touchDragDelayTimer) {
+      clearTimeout(touchDragDelayTimer);
+      touchDragDelayTimer = null;
+    }
 
     card.classList.remove("dragging");
     clearTouchDragPreview();
     clearTouchDragOverFolder();
+    touchDragSource = null;
+
+    if (!wasDragging) return;
 
     // Verifica se soltou sobre uma pasta ou breadcrumb
     var touch = e.changedTouches[0];
@@ -1892,7 +1931,6 @@
       }
     }
 
-    touchDragSource = null;
   });
 
   // Cleanup touch drag no cancelamento
@@ -1900,6 +1938,10 @@
     if (touchDragSource) {
       touchDragSource.card.classList.remove("dragging");
       touchDragSource = null;
+    }
+    if (touchDragDelayTimer) {
+      clearTimeout(touchDragDelayTimer);
+      touchDragDelayTimer = null;
     }
     clearTouchDragOverFolder();
     clearTouchDragPreview();
