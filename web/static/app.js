@@ -1744,7 +1744,7 @@
   var touchDragStartX = 0;
   var touchDragStartY = 0;
   var touchDragThreshold = 10; // pixels
-  var touchDragDelay = 1000; // Na lista, exige um toque parado antes de arrastar.
+  var touchDragDelay = 1000; // Em mobile, exige um toque parado antes de arrastar.
 
   function clearTouchDragPreview() {
     if (touchDragPreview) {
@@ -1831,7 +1831,7 @@
       touchDragDelayTimer = null;
     }
 
-    var requiresLongPress = root.dataset.view === "list";
+    var requiresLongPress = window.matchMedia("(max-width: 768px)").matches;
     touchDragSource = {
       card: card,
       checkbox: checkbox,
