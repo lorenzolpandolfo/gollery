@@ -45,11 +45,26 @@
 
   /* ---------------- Tema ---------------- */
 
-  $("theme-toggle").addEventListener("click", function () {
-    var next = root.dataset.theme === "dark" ? "light" : "dark";
-    root.dataset.theme = next;
-    safeSet("gollery-theme", next);
-  });
+  var themeToggle = $("theme-toggle");
+  if (themeToggle) {
+    function syncThemeToggle() {
+      var isDark = root.dataset.theme === "dark";
+      themeToggle.setAttribute("aria-checked", String(isDark));
+      themeToggle.setAttribute(
+        "aria-label",
+        isDark ? "Tema escuro. Alternar para claro" : "Tema claro. Alternar para escuro"
+      );
+      $("theme-current").textContent = isDark ? "Escuro" : "Claro";
+    }
+
+    themeToggle.addEventListener("click", function () {
+      root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+      safeSet("gollery-theme", root.dataset.theme);
+      syncThemeToggle();
+    });
+
+    syncThemeToggle();
+  }
 
   /* ---------------- Grade / lista ---------------- */
 
@@ -243,7 +258,39 @@
     folderError.hidden = false;
   }
 
+  var createMenu = $("create-menu");
+  var createMenuToggle = $("create-menu-toggle");
+  var createMenuOptions = $("create-menu-options");
+
+  function closeCreateMenu() {
+    createMenuOptions.hidden = true;
+    createMenuToggle.setAttribute("aria-expanded", "false");
+  }
+
+  createMenuToggle.addEventListener("click", function () {
+    var isOpen = !createMenuOptions.hidden;
+    createMenuOptions.hidden = isOpen;
+    createMenuToggle.setAttribute("aria-expanded", String(!isOpen));
+    if (isOpen) {
+      createMenuToggle.focus();
+    } else {
+      $("upload-menu-item").focus();
+    }
+  });
+
+  document.addEventListener("click", function (e) {
+    if (!createMenu.contains(e.target)) closeCreateMenu();
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && !createMenuOptions.hidden) {
+      closeCreateMenu();
+      createMenuToggle.focus();
+    }
+  });
+
   $("new-folder").addEventListener("click", function () {
+    closeCreateMenu();
     folderName.value = "";
     folderError.hidden = true;
     folderDialog.showModal();
@@ -358,6 +405,10 @@
   /* ---------------- Upload ---------------- */
 
   var fileInput = $("file-input");
+  $("upload-menu-item").addEventListener("click", function () {
+    closeCreateMenu();
+    fileInput.click();
+  });
 
   var panel = $("upload-panel");
   var uploadTitle = $("upload-title");
@@ -560,10 +611,17 @@
 
   var dropOverlay = $("drop-overlay");
   var dragDepth = 0;
+  var internalItemDragType = "application/x-gollery-items";
+
+  function isInternalItemDrag(e) {
+    return !!e.dataTransfer &&
+      Array.prototype.indexOf.call(e.dataTransfer.types || [], internalItemDragType) !== -1;
+  }
 
   function hasFiles(e) {
     return (
       !!e.dataTransfer &&
+      !isInternalItemDrag(e) &&
       Array.prototype.indexOf.call(e.dataTransfer.types || [], "Files") !== -1
     );
   }
@@ -591,6 +649,10 @@
   }
 
   window.addEventListener("dragenter", function (e) {
+    if (isInternalItemDrag(e)) {
+      e.preventDefault();
+      return;
+    }
     if (!hasFiles(e) || uploading) return;
     e.preventDefault();
     dragDepth++;
@@ -598,16 +660,27 @@
   });
 
   window.addEventListener("dragover", function (e) {
+    if (isInternalItemDrag(e)) {
+      e.preventDefault();
+      return;
+    }
     if (hasFiles(e)) e.preventDefault();
   });
 
   window.addEventListener("dragleave", function (e) {
+    if (isInternalItemDrag(e)) return;
     if (!hasFiles(e)) return;
     dragDepth = Math.max(0, dragDepth - 1);
     if (dragDepth === 0) dropOverlay.hidden = true;
   });
 
   window.addEventListener("drop", function (e) {
+    if (isInternalItemDrag(e)) {
+      e.preventDefault();
+      dragDepth = 0;
+      dropOverlay.hidden = true;
+      return;
+    }
     if (!hasFiles(e)) return;
 
     e.preventDefault();
@@ -627,6 +700,9 @@
   var bulkDownloadBtn = $("bulk-download");
   var bulkDeleteBtn = $("bulk-delete");
   var bulkCancelBtn = $("bulk-cancel");
+  var mobileSelectionCancelBtn = $("mobile-selection-cancel");
+  var mobileSelectionDownloadBtn = $("mobile-selection-download");
+  var mobileSelectionDeleteBtn = $("mobile-selection-delete");
 
   var selectedItems = new Set();
 
@@ -638,6 +714,10 @@
 
   function updateBulkToolbar() {
     var count = selectedItems.size;
+    root.classList.toggle(
+      "mobile-selection",
+      count > 0 && window.matchMedia("(max-width: 768px)").matches
+    );
     if (count > 0) {
       bulkCount.textContent = count + " " + plural(count, "item selecionado", "itens selecionados");
       bulkToolbar.hidden = false;
@@ -645,6 +725,8 @@
       bulkToolbar.hidden = true;
     }
   }
+
+  window.addEventListener("resize", updateBulkToolbar);
 
   function updateItemSelection(itemEl, selected) {
     var card = itemEl.closest(".file-card");
@@ -809,8 +891,11 @@
   var photoViewerMeta = $("photo-viewer-meta");
   var photoViewerStar = $("photo-viewer-star");
   var photoViewerDownload = $("photo-viewer-download");
+  var photoViewerLocation = $("photo-viewer-location");
   var photoViewerDelete = $("photo-viewer-delete");
+  var photoViewerStage = photoViewer.querySelector(".photo-stage");
   var activePhoto = null;
+  var photoViewerTouchStart = null;
 
   function syncPhotoViewerStar(starred) {
     photoViewerStar.dataset.starred = String(starred);
@@ -822,21 +907,28 @@
     );
     var label = photoViewerStar.querySelector("span");
     if (label) label.textContent = starred ? "Com estrela" : "Estrela";
-    if (activePhoto) activePhoto.dataset.starred = String(starred);
+    if (activePhoto) {
+      document.querySelectorAll(".photo-open").forEach(function (button) {
+        if (button.dataset.path === activePhoto.dataset.path) {
+          button.dataset.starred = String(starred);
+        }
+      });
+    }
   }
 
-  fileList.addEventListener("click", function (e) {
-    var button = e.target.closest(".photo-open");
-    if (!button) return;
+  function getPhotoCheckbox(button) {
+    var card = button.closest(".photo-tile");
+    var checkbox = card && card.querySelector(".select-item");
+    if (checkbox) return checkbox;
 
-    if (window.matchMedia("(max-width: 768px)").matches && selectedItems.size > 0) {
-      e.preventDefault();
-      var checkbox = button.closest(".file-card").querySelector(".select-item");
-      checkbox.checked = !checkbox.checked;
-      toggleItem(checkbox);
-      return;
+    var checkboxes = fileList.querySelectorAll(".photo-tile .select-item");
+    for (var i = 0; i < checkboxes.length; i++) {
+      if (checkboxes[i].dataset.path === button.dataset.path) return checkboxes[i];
     }
+    return null;
+  }
 
+  function showPhotoViewerPhoto(button) {
     activePhoto = button;
     photoViewerImage.src = button.dataset.url;
     photoViewerImage.alt = button.dataset.name;
@@ -848,11 +940,87 @@
     ].filter(Boolean).join(" · ");
     photoViewerDownload.href = button.dataset.url + "?download=1";
     photoViewerDownload.download = button.dataset.name;
+    var pathSeparator = button.dataset.path.lastIndexOf("/");
+    var parentPath = pathSeparator < 0 ? "" : button.dataset.path.slice(0, pathSeparator);
+    photoViewerLocation.href = parentPath
+      ? "/?path=" + encodeURIComponent(parentPath)
+      : "/";
     photoViewerStar.dataset.kind = "file";
     photoViewerStar.dataset.path = button.dataset.path;
     syncPhotoViewerStar(button.dataset.starred === "true");
+  }
+
+  function openPhotoViewer(button) {
+    if (window.matchMedia("(max-width: 768px)").matches && selectedItems.size > 0) {
+      var checkbox = getPhotoCheckbox(button);
+      if (checkbox) {
+        checkbox.checked = !checkbox.checked;
+        toggleItem(checkbox);
+        return;
+      }
+    }
+
+    showPhotoViewerPhoto(button);
     photoViewer.showModal();
+  }
+
+  function navigatePhotoViewer(direction) {
+    if (!activePhoto) return;
+
+    var photos = fileList.querySelectorAll(".photo-tile .photo-open");
+    var currentIndex = -1;
+    for (var i = 0; i < photos.length; i++) {
+      if (photos[i].dataset.path === activePhoto.dataset.path) {
+        currentIndex = i;
+        break;
+      }
+    }
+    var nextIndex = currentIndex + direction;
+    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= photos.length) return;
+    showPhotoViewerPhoto(photos[nextIndex]);
+  }
+
+  fileList.addEventListener("click", function (e) {
+    var button = e.target.closest(".photo-open");
+    if (button) openPhotoViewer(button);
   });
+
+  var photoCarousel = document.querySelector(".photo-carousel");
+  if (photoCarousel) {
+    photoCarousel.addEventListener("click", function (e) {
+      var button = e.target.closest(".photo-open");
+      if (button) openPhotoViewer(button);
+    });
+  }
+
+  photoViewerStage.addEventListener("touchstart", function (e) {
+    if (e.touches.length !== 1) {
+      photoViewerTouchStart = null;
+      return;
+    }
+    photoViewerTouchStart = {
+      x: e.touches[0].clientX,
+      y: e.touches[0].clientY,
+    };
+  }, { passive: true });
+
+  photoViewerStage.addEventListener("touchend", function (e) {
+    if (!photoViewerTouchStart || e.changedTouches.length !== 1) {
+      photoViewerTouchStart = null;
+      return;
+    }
+
+    var deltaX = e.changedTouches[0].clientX - photoViewerTouchStart.x;
+    var deltaY = e.changedTouches[0].clientY - photoViewerTouchStart.y;
+    photoViewerTouchStart = null;
+    if (Math.abs(deltaX) > 50 && Math.abs(deltaX) > Math.abs(deltaY)) {
+      navigatePhotoViewer(deltaX < 0 ? 1 : -1);
+    }
+  }, { passive: true });
+
+  photoViewerStage.addEventListener("touchcancel", function () {
+    photoViewerTouchStart = null;
+  }, { passive: true });
 
   closeOnBackdrop(photoViewer);
   $("photo-viewer-close").addEventListener("click", function () {
@@ -860,6 +1028,7 @@
   });
   photoViewer.addEventListener("close", function () {
     activePhoto = null;
+    photoViewerTouchStart = null;
     photoViewerImage.removeAttribute("src");
   });
 
@@ -1017,6 +1186,13 @@
   });
 
   bulkCancelBtn.addEventListener("click", clearSelection);
+  mobileSelectionCancelBtn.addEventListener("click", clearSelection);
+  mobileSelectionDownloadBtn.addEventListener("click", function () {
+    bulkDownloadBtn.click();
+  });
+  mobileSelectionDeleteBtn.addEventListener("click", function () {
+    bulkDeleteBtn.click();
+  });
 
   // Download em lote
   bulkDownloadBtn.addEventListener("click", async function () {
@@ -1122,6 +1298,7 @@
   var longPressTimer = null;
   var longPressThreshold = 500; // ms
   var isLongPress = false;
+  var touchSelectionActive = false;
   var longPressedCard = null;
   var longPressClickTimer = null;
 
@@ -1154,6 +1331,9 @@
       clearTimeout(longPressTimer);
       longPressTimer = null;
     }
+    touchSelectionActive = false;
+    if (touchDragSource) touchDragSource.card.classList.remove("dragging");
+    clearTouchDragPreview();
     touchDragSource = null;
   }, { passive: true });
 
@@ -1231,6 +1411,7 @@
 
     // Define dados do drag
     e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData(internalItemDragType, "1");
     e.dataTransfer.setData("text/plain", JSON.stringify(dragSourceCards));
 
     // Adiciona classe visual
@@ -1403,15 +1584,18 @@
   /* ---------------- Long press para seleção (mobile) ---------------- */
 
   fileList.addEventListener("touchstart", function (e) {
-    if (e.touches.length > 1) return;
+    if (e.touches.length > 1) {
+      touchSelectionActive = false;
+      return;
+    }
+    touchSelectionActive = false;
     var card = e.target.closest(".file-card");
     if (!card) return;
 
     var checkbox = card.querySelector(".select-item");
     if (!checkbox) return;
-
-    // Se já está selecionado, não inicia long press
-    if (checkbox.checked) return;
+    if (checkbox.checked &&
+        !(fileList.classList.contains("photo-mosaic") && card.matches(".photo-tile"))) return;
 
     // O botão da miniatura também permite selecionar por toque prolongado.
     if ((e.target.closest("button") && !e.target.closest(".photo-open")) ||
@@ -1420,13 +1604,14 @@
     isLongPress = false;
     longPressTimer = setTimeout(function () {
       isLongPress = true;
-      checkbox.checked = true;
-      toggleItem(checkbox);
+      if (!checkbox.checked) {
+        checkbox.checked = true;
+        toggleItem(checkbox);
+      }
+      touchSelectionActive = fileList.classList.contains("photo-mosaic") &&
+        card.matches(".photo-tile");
       longPressedCard = card;
       clearTimeout(longPressClickTimer);
-      longPressClickTimer = setTimeout(function () {
-        longPressedCard = null;
-      }, 400);
       // Feedback tátil
       if (navigator.vibrate) navigator.vibrate(50);
     }, longPressThreshold);
@@ -1442,7 +1627,12 @@
     if (isLongPress) {
       isLongPress = false;
       e.preventDefault();
+      clearTimeout(longPressClickTimer);
+      longPressClickTimer = setTimeout(function () {
+        longPressedCard = null;
+      }, 400);
     }
+    touchSelectionActive = false;
   });
 
   fileList.addEventListener("touchmove", function (e) {
@@ -1451,14 +1641,96 @@
       clearTimeout(longPressTimer);
       longPressTimer = null;
     }
-  });
+
+    if (!touchSelectionActive || e.touches.length !== 1) return;
+
+    e.preventDefault();
+    var touch = e.touches[0];
+    var target = document.elementFromPoint(touch.clientX, touch.clientY);
+    var card = target && target.closest(".photo-tile");
+    var checkbox = card && card.querySelector(".select-item");
+    if (checkbox && fileList.contains(card) && !checkbox.checked) {
+      checkbox.checked = true;
+      toggleItem(checkbox);
+    }
+  }, { passive: false });
 
   /* ---------------- Touch drag para mobile (arrastar para mover) ---------------- */
 
   var touchDragSource = null;
+  var touchDragOverFolder = null;
+  var touchDragPreview = null;
   var touchDragStartX = 0;
   var touchDragStartY = 0;
   var touchDragThreshold = 10; // pixels
+
+  function clearTouchDragPreview() {
+    if (touchDragPreview) {
+      touchDragPreview.remove();
+      touchDragPreview = null;
+    }
+  }
+
+  function createTouchDragPreview(touch) {
+    var itemCount = selectedItems.size > 0 && touchDragSource.checkbox.checked
+      ? selectedItems.size
+      : 1;
+    var preview = document.createElement("div");
+    preview.className = "touch-drag-preview";
+    preview.setAttribute("aria-hidden", "true");
+
+    var count = document.createElement("span");
+    count.className = "touch-drag-preview-count";
+    count.textContent = String(itemCount);
+    preview.appendChild(count);
+
+    var label = document.createElement("span");
+    label.textContent = itemCount === 1 ? "item arrastado" : "itens arrastados";
+    preview.appendChild(label);
+
+    document.body.appendChild(preview);
+    touchDragPreview = preview;
+    updateTouchDragPreviewPosition(touch);
+  }
+
+  function updateTouchDragPreviewPosition(touch) {
+    if (!touchDragPreview) return;
+
+    var left = Math.min(touch.clientX + 16, window.innerWidth - touchDragPreview.offsetWidth - 8);
+    var top = Math.min(touch.clientY + 16, window.innerHeight - touchDragPreview.offsetHeight - 8);
+    touchDragPreview.style.left = Math.max(8, left) + "px";
+    touchDragPreview.style.top = Math.max(8, top) + "px";
+  }
+
+  function clearTouchDragOverFolder() {
+    if (touchDragOverFolder) {
+      touchDragOverFolder.classList.remove("drag-over");
+      touchDragOverFolder = null;
+    }
+  }
+
+  function updateTouchDragOverFolder(touch) {
+    var target = document.elementFromPoint(touch.clientX, touch.clientY);
+    var folderCard = target && target.closest(".folder-card");
+    if (folderCard === touchDragOverFolder) return;
+
+    clearTouchDragOverFolder();
+    if (!folderCard || !fileList.contains(folderCard)) return;
+
+    var folderCheckbox = folderCard.querySelector(".select-item");
+    if (!folderCheckbox || folderCheckbox.dataset.kind !== "folder") return;
+
+    var itemsToMove = selectedItems.size > 0 && touchDragSource.checkbox.checked
+      ? getSelectedItems()
+      : [{
+          kind: touchDragSource.checkbox.dataset.kind,
+          path: touchDragSource.checkbox.dataset.path,
+        }];
+    if (isInvalidMoveTarget(itemsToMove, folderCheckbox.dataset.path)) return;
+
+    folderCard.classList.add("drag-over");
+    touchDragOverFolder = folderCard;
+  }
 
   fileList.addEventListener("touchstart", function (e) {
     if (isLongPress || e.touches.length > 1) return; // Não inicia drag em gesto de pinça
@@ -1477,6 +1749,7 @@
       checkbox: checkbox,
       startX: e.touches[0].clientX,
       startY: e.touches[0].clientY,
+      dragging: false,
     };
   }, { passive: true });
 
@@ -1488,9 +1761,14 @@
     var distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
 
     if (distance > touchDragThreshold) {
-      // Inicia drag visual
-      touchDragSource.card.classList.add("dragging");
+      if (!touchDragSource.dragging) {
+        touchDragSource.dragging = true;
+        touchDragSource.card.classList.add("dragging");
+        createTouchDragPreview(e.touches[0]);
+      }
+      updateTouchDragPreviewPosition(e.touches[0]);
       e.preventDefault(); // Impede scroll
+      updateTouchDragOverFolder(e.touches[0]);
     }
   }, { passive: false });
 
@@ -1501,6 +1779,8 @@
     var checkbox = touchDragSource.checkbox;
 
     card.classList.remove("dragging");
+    clearTouchDragPreview();
+    clearTouchDragOverFolder();
 
     // Verifica se soltou sobre uma pasta ou breadcrumb
     var touch = e.changedTouches[0];
@@ -1545,9 +1825,12 @@
       touchDragSource.card.classList.remove("dragging");
       touchDragSource = null;
     }
+    clearTouchDragOverFolder();
+    clearTouchDragPreview();
     if (longPressTimer) {
       clearTimeout(longPressTimer);
       longPressTimer = null;
     }
+    touchSelectionActive = false;
   });
 })();

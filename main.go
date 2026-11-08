@@ -22,6 +22,7 @@ import (
 	"os/signal"
 	pathpkg "path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -106,7 +107,15 @@ func (f File) URL() string {
 	return (&url.URL{Path: "/media/" + f.Path}).EscapedPath()
 }
 
+func (f File) TrashPreviewURL() string {
+	return "/trash/preview?id=" + url.QueryEscape(f.TrashID)
+}
+
 func (f File) SizeLabel() string { return formatBytes(f.Size) }
+
+func (f File) Title() string {
+	return strings.TrimSuffix(f.Name, filepath.Ext(f.Name))
+}
 
 func (f File) DateLabel() string { return f.CreatedDate.Local().Format("02/01/2006 15:04") }
 
@@ -147,7 +156,6 @@ type Crumb struct {
 
 // StorageStats resume o uso de armazenamento da biblioteca e do disco.
 type StorageStats struct {
-	Hostname   string
 	FileCount  int
 	UsedBytes  int64 // soma do tamanho de todos os arquivos
 	HasDisk    bool
@@ -155,6 +163,12 @@ type StorageStats struct {
 	DiskFree   int64
 	GalleryPct float64 // % do disco ocupado pela galeria
 	OtherPct   float64 // % do disco ocupado por outros dados
+}
+
+type DeviceInfo struct {
+	Hostname        string
+	OperatingSystem string
+	Architecture    string
 }
 
 type ViewCount struct {
@@ -170,16 +184,18 @@ type View struct {
 }
 
 type FileData struct {
-	Folders []Folder
-	Files   []File
-	Count   ViewCount
-	Stats   StorageStats
-	View    string
-	Path    string
-	Crumbs  []Crumb
-	Query   string
-	Sort    string
-	Order   string
+	Folders      []Folder
+	Files        []File
+	LatestPhotos []File
+	Count        ViewCount
+	Stats        StorageStats
+	Device       DeviceInfo
+	View         string
+	Path         string
+	Crumbs       []Crumb
+	Query        string
+	Sort         string
+	Order        string
 }
 
 // SortOptions descreve a ordenação pedida pelo cliente.
@@ -271,6 +287,7 @@ func main() {
 	mux.HandleFunc("/star", starHandler)
 	mux.HandleFunc("/rename", renameHandler)
 	mux.HandleFunc("/trash/restore", restoreTrashHandler)
+	mux.HandleFunc("/trash/preview", trashPreviewHandler)
 	mux.HandleFunc("/trash", trashHandler)
 	mux.HandleFunc("/delete", deleteHandler)
 	mux.HandleFunc("/bulk-delete", bulkDeleteHandler)
@@ -814,6 +831,9 @@ func renameHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		name := sanitizeFilename(req.Name)
+		if ext := filepath.Ext(name); ext == "" || ext == "." {
+			name = strings.TrimSuffix(name, ".") + filepath.Ext(file.Name)
+		}
 		if !validSegment(name) || !validSegment(file.Id+"__"+name) {
 			http.Error(w, "invalid file name", http.StatusBadRequest)
 			return
@@ -1882,13 +1902,6 @@ func buildStats() StorageStats {
 
 	stats := StorageStats{FileCount: count, UsedBytes: used}
 
-	hostname, err := os.Hostname()
-	if err != nil {
-		log.Printf("hostname lookup error: %v", err)
-	} else {
-		stats.Hostname = hostname
-	}
-
 	total, free, ok := diskUsage(mediaDirectory)
 
 	if !ok || total <= 0 {
@@ -1912,6 +1925,19 @@ func buildStats() StorageStats {
 	}
 
 	return stats
+}
+
+func currentDeviceInfo() DeviceInfo {
+	hostname, err := os.Hostname()
+	if err != nil {
+		log.Printf("hostname lookup error: %v", err)
+	}
+
+	return DeviceInfo{
+		Hostname:        hostname,
+		OperatingSystem: runtime.GOOS,
+		Architecture:    runtime.GOARCH,
+	}
 }
 
 func roundPercent(value float64) float64 {
@@ -1985,19 +2011,34 @@ func renderPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var latestPhotos []File
+	if request.View == "photos" {
+		latestPhotos = view.Files
+		if len(latestPhotos) > 10 {
+			latestPhotos = latestPhotos[:10]
+		}
+	}
+
+	var device DeviceInfo
+	if request.View == "storage" {
+		device = currentDeviceInfo()
+	}
+
 	var output bytes.Buffer
 
 	if err := tmpl.Execute(&output, FileData{
-		Folders: view.Folders,
-		Files:   view.Files,
-		Count:   view.Count,
-		Stats:   buildStats(),
-		View:    request.View,
-		Path:    request.Path,
-		Crumbs:  buildCrumbs(request.Path),
-		Query:   request.Query,
-		Sort:    request.Opts.By,
-		Order:   request.Opts.Order,
+		Folders:      view.Folders,
+		Files:        view.Files,
+		LatestPhotos: latestPhotos,
+		Count:        view.Count,
+		Stats:        buildStats(),
+		Device:       device,
+		View:         request.View,
+		Path:         request.Path,
+		Crumbs:       buildCrumbs(request.Path),
+		Query:        request.Query,
+		Sort:         request.Opts.By,
+		Order:        request.Opts.Order,
 	}); err != nil {
 		log.Printf("template execution error: %v", err)
 		http.Error(w, "unable to render page", http.StatusInternalServerError)
@@ -2960,6 +3001,53 @@ func mediaHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	serveStoredFile(w, r, file, r.URL.Query().Get("download") == "1")
+}
+
+func trashPreviewHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet, http.MethodHead) {
+		return
+	}
+
+	id := strings.ToLower(r.URL.Query().Get("id"))
+	if !isUUID(id) {
+		http.NotFound(w, r)
+		return
+	}
+
+	persistentState.RLock()
+	var item trashEntry
+	found := false
+	for _, candidate := range persistentState.trash {
+		if candidate.ID == id && candidate.Kind == "file" {
+			item = candidate
+			found = true
+			break
+		}
+	}
+	persistentState.RUnlock()
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+
+	info, err := os.Stat(fullPath(item.TrashPath))
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("trash preview: unable to stat %s: %v", item.TrashPath, err)
+			http.Error(w, "unable to read trashed file", http.StatusInternalServerError)
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
+
+	file, ok := fileFromInfo(parentRel(item.TrashPath), info)
+	if !ok || file.Kind != "image" {
+		http.NotFound(w, r)
+		return
+	}
+	file.Path = item.TrashPath
+	serveStoredFile(w, r, file, false)
 }
 
 func serveStoredFile(w http.ResponseWriter, r *http.Request, file File, attachment bool) {

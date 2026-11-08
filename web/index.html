@@ -38,30 +38,59 @@
   <body>
     <header class="topbar">
       <a class="logo" href="/">Gollery</a>
+      <button
+        id="mobile-selection-cancel"
+        class="icon-button"
+        type="button"
+        title="Cancelar seleção"
+        aria-label="Cancelar seleção"
+      >
+        <i class="icon-x"></i>
+      </button>
 
       <div class="topbar-actions">
         <button
-          id="theme-toggle"
+          id="mobile-selection-delete"
           class="icon-button"
           type="button"
-          title="Alternar tema"
-          aria-label="Alternar tema claro/escuro"
+          title="Mover selecionados para a lixeira"
+          aria-label="Mover selecionados para a lixeira"
         >
-          <i class="icon-moon theme-icon-dark"></i>
-          <i class="icon-sun theme-icon-light"></i>
+          <i class="icon-trash"></i>
         </button>
 
-        <div class="upload-form" {{ if or (eq .View "trash") (eq .View "storage") }}hidden{{ end }}>
+        <div id="create-menu" class="create-menu" {{ if or (eq .View "trash") (eq .View "storage") }}hidden{{ end }}>
           <input id="file-input" type="file" name="Files" multiple hidden />
-
-          <label
-            for="file-input"
-            class="icon-button upload-button"
-            title="Enviar arquivos para esta pasta"
+          <button
+            id="create-menu-toggle"
+            class="icon-button"
+            type="button"
+            title="Criar ou enviar"
+            aria-label="Criar ou enviar"
+            aria-expanded="false"
+            aria-controls="create-menu-options"
           >
-            <i class="icon-upload"></i>
-          </label>
+            <i class="icon-plus"></i>
+          </button>
+          <div id="create-menu-options" class="create-menu-options" role="menu" hidden>
+            <button id="upload-menu-item" class="create-menu-item" type="button" role="menuitem">
+              <i class="icon-upload"></i> Enviar arquivo
+            </button>
+            <button id="new-folder" class="create-menu-item" type="button" role="menuitem" {{ if ne .View "" }}hidden{{ end }}>
+              <i class="icon-folder-plus"></i> Criar pasta
+            </button>
+          </div>
         </div>
+
+        <button
+          id="mobile-selection-download"
+          class="icon-button"
+          type="button"
+          title="Baixar selecionados"
+          aria-label="Baixar selecionados"
+        >
+          <i class="icon-download"></i>
+        </button>
       </div>
     </header>
 
@@ -76,35 +105,23 @@
         <i class="icon-image"></i><span>Fotos</span>
       </a>
       <a class="library-nav-link{{ if eq .View "starred" }} active{{ end }}" href="/?view=starred">
-        <i class="icon-star"></i><span>Com estrela</span>
+        <i class="icon-star"></i><span>Favoritos</span>
       </a>
       <a class="library-nav-link{{ if eq .View "trash" }} active{{ end }}" href="/?view=trash">
         <i class="icon-trash"></i><span>Lixeira</span>
       </a>
       <a class="library-nav-link{{ if eq .View "storage" }} active{{ end }}" href="/?view=storage">
-        <i class="icon-hard-drive"></i><span>Armazenamento</span>
+        <i class="icon-hard-drive"></i><span>Uso</span>
       </a>
     </nav>
 
     <main class="content">
       {{ if eq .View "storage" }}
       {{ template "storage-stats" .Stats }}
+      {{ template "device-info" .Device }}
+      {{ template "theme-setting" }}
       {{ end }}
       <div id="library-view" {{ if eq .View "storage" }}hidden{{ end }}>
-
-      <nav class="breadcrumb" aria-label="Caminho">
-        {{ if eq .View "trash" }}
-        <span class="crumb-current">Lixeira</span>
-        {{ else if .Crumbs }}
-        <a class="crumb-root" href="/" data-drop-path="" data-drop-name="Início" aria-label="Início" title="Início"><i class="icon-folder" aria-hidden="true"></i><span>Início</span></a>
-        {{ range .Crumbs }}
-        <i class="icon-chevron-right"></i>
-        {{ if .Current }}<span class="crumb-current" data-drop-path="{{ .Path }}">{{ .Name }}</span>{{ else }}<a href="/?path={{ .Path }}" data-drop-path="{{ .Path }}">{{ .Name }}</a>{{ end }}
-        {{ end }}
-        {{ else }}
-        <span class="crumb-current crumb-root" data-drop-path="" data-drop-name="Início" aria-label="Início" title="Início"><i class="icon-folder" aria-hidden="true"></i><span>Início</span></span>
-        {{ end }}
-      </nav>
 
       <div class="gallery-header">
         <div class="title-group">
@@ -113,9 +130,6 @@
           {{ if eq .View "trash" }}<span class="trash-hint">Os itens são excluídos definitivamente após 30 dias.</span>{{ end }}
         </div>
 
-        <button id="new-folder" class="btn" type="button" {{ if eq .View "trash" }}hidden{{ end }}>
-          <i class="icon-folder-plus"></i> Nova pasta
-        </button>
       </div>
 
       <!-- Bulk actions toolbar (hidden by default) -->
@@ -191,6 +205,42 @@
           </div>
         </div>
       </form>
+
+      {{ if and (eq .View "photos") .LatestPhotos }}
+      <div class="photo-carousel" role="region" aria-label="Fotos mais recentes">
+        {{ range .LatestPhotos }}
+        <button
+          class="photo-carousel-item photo-open"
+          type="button"
+          data-path="{{ .Path }}"
+          data-name="{{ .Name }}"
+          data-url="{{ .URL }}"
+          data-size="{{ .SizeLabel }}"
+          data-date="{{ .DateLabel }}"
+          data-location="{{ .Location }}"
+          data-starred="{{ .Starred }}"
+          aria-label="Visualizar {{ .Name }}"
+        >
+          <img loading="lazy" src="{{ .URL }}" alt="{{ .Name }}" />
+          <span class="photo-carousel-title">{{ .Title }}</span>
+        </button>
+        {{ end }}
+      </div>
+      {{ end }}
+
+      <nav class="breadcrumb" aria-label="Caminho">
+        {{ if eq .View "trash" }}
+        <span class="crumb-current">Lixeira</span>
+        {{ else if .Crumbs }}
+        <a class="crumb-root" href="/" data-drop-path="" data-drop-name="Início" aria-label="Início" title="Início"><i class="icon-folder" aria-hidden="true"></i><span>Início</span></a>
+        {{ range .Crumbs }}
+        <i class="icon-chevron-right"></i>
+        {{ if .Current }}<span class="crumb-current" data-drop-path="{{ .Path }}">{{ .Name }}</span>{{ else }}<a href="/?path={{ .Path }}" data-drop-path="{{ .Path }}">{{ .Name }}</a>{{ end }}
+        {{ end }}
+        {{ else }}
+        <span class="crumb-current crumb-root" data-drop-path="" data-drop-name="Início" aria-label="Início" title="Início"><i class="icon-folder" aria-hidden="true"></i><span>Início</span></span>
+        {{ end }}
+      </nav>
 
       <div id="file-list" class="gallery{{ if eq .View "photos" }} photo-mosaic{{ end }}"{{ if eq .View "photos" }} aria-label="Fotos, 3 colunas"{{ end }}>
         {{ if eq .View "photos" }}
@@ -339,6 +389,9 @@
             <a id="photo-viewer-download" class="photo-viewer-action" href="#" download>
               <i class="icon-download"></i><span>Baixar</span>
             </a>
+            <a id="photo-viewer-location" class="photo-viewer-action" href="/">
+              <i class="icon-folder"></i><span>Localizar</span>
+            </a>
             <button id="photo-viewer-delete" class="photo-viewer-action" type="button">
               <i class="icon-trash"></i><span>Excluir</span>
             </button>
@@ -358,7 +411,7 @@
   <div class="storage-head">
     <span class="storage-title"><i class="icon-hard-drive"></i> Armazenamento</span>
     <span class="storage-numbers">
-      {{ formatBytes .UsedBytes }} na galeria{{ if .HasDisk }} · {{ formatBytes .DiskFree }} livres de {{ formatBytes .DiskTotal }}{{ end }}{{ if .Hostname }} · Máquina: {{ .Hostname }}{{ end }}
+      {{ formatBytes .UsedBytes }} na galeria{{ if .HasDisk }} · {{ formatBytes .DiskFree }} livres de {{ formatBytes .DiskTotal }}{{ end }}
     </span>
   </div>
   {{ if .HasDisk }}
@@ -373,6 +426,50 @@
   </div>
   {{ end }}
 
+</section>
+{{ end }}
+
+{{ define "device-info" }}
+<section class="storage device-info" aria-label="Dispositivo atual">
+  <div class="storage-head">
+    <span class="storage-title"><i class="icon-monitor"></i> Dispositivo atual</span>
+  </div>
+  <div class="device-info-details">
+    {{ if .Hostname }}
+    <div><span class="device-info-label">Nome</span><strong>{{ .Hostname }}</strong></div>
+    {{ end }}
+    <div><span class="device-info-label">Sistema operacional</span><strong>{{ .OperatingSystem }}</strong></div>
+    <div><span class="device-info-label">Arquitetura</span><strong>{{ .Architecture }}</strong></div>
+  </div>
+</section>
+{{ end }}
+
+{{ define "theme-setting" }}
+<section class="storage theme-setting" aria-label="Tema da interface">
+  <div class="storage-head">
+    <span class="storage-title"><i class="icon-sun"></i> Aparência</span>
+  </div>
+  <div class="theme-setting-row">
+    <div class="theme-setting-copy">
+      <strong>Tema da interface</strong>
+      <span id="theme-current">Tema claro ou escuro</span>
+    </div>
+    <button
+      id="theme-toggle"
+      class="theme-switch"
+      type="button"
+      role="switch"
+      aria-checked="false"
+      aria-label="Alternar tema claro/escuro"
+    >
+      <span class="theme-switch-track">
+        <span class="theme-switch-thumb">
+          <i class="icon-moon theme-icon-dark"></i>
+          <i class="icon-sun theme-icon-light"></i>
+        </span>
+      </span>
+    </button>
+  </div>
 </section>
 {{ end }}
 
@@ -484,7 +581,11 @@
   {{ end }}
   {{ if .Trashed }}<div class="file-thumb">{{ else }}<a class="file-thumb" href="{{ .URL }}" target="_blank" rel="noopener">{{ end }}
     {{ if .Trashed }}
-    <div class="file-card-not-media">{{ .Ext }}</div>
+      {{ if eq .Kind "image" }}
+      <img loading="lazy" src="{{ .TrashPreviewURL }}" alt="{{ .Name }}" />
+      {{ else }}
+      <div class="file-card-not-media">{{ .Ext }}</div>
+      {{ end }}
     {{ else if eq .Kind "video" }}
     <video muted preload="metadata" src="{{ .URL }}"></video>
     {{ else if eq .Kind "image" }}

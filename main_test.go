@@ -241,6 +241,34 @@ func TestRenameFilePreservesID(t *testing.T) {
 	}
 }
 
+func TestRenameFilePreservesExtensionWhenOmitted(t *testing.T) {
+	useTemporaryMedia(t)
+	id := "123e4567-e89b-12d3-a456-426614174000"
+	oldPath := id + "__before.JPG"
+	if err := os.WriteFile(fullPath(oldPath), []byte("photo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := json.Marshal(renameRequest{Kind: "file", Path: oldPath, Name: "after"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/rename", bytes.NewReader(payload))
+	response := httptest.NewRecorder()
+	renameHandler(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("rename response = %d %q", response.Code, response.Body.String())
+	}
+
+	file, err := findFileByReference(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Name != "after.JPG" {
+		t.Fatalf("renamed file name = %q, want %q", file.Name, "after.JPG")
+	}
+}
+
 func TestFolderRenameRebasesTrashAndStarredPaths(t *testing.T) {
 	useTemporaryMedia(t)
 	if err := os.Mkdir(fullPath("old"), 0755); err != nil {
@@ -421,6 +449,35 @@ func TestTrashRestorePermanentDeleteAndExpiry(t *testing.T) {
 	}
 }
 
+func TestTrashPreviewServesTrashedImage(t *testing.T) {
+	useTemporaryMedia(t)
+	filePath := "123e4567-e89b-12d3-a456-426614174000__photo.jpg"
+	image := []byte{0xff, 0xd8, 0xff, 0x00}
+	if err := os.WriteFile(fullPath(filePath), image, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := moveToTrash("file", filePath); err != nil {
+		t.Fatal(err)
+	}
+
+	persistentState.RLock()
+	trashID := persistentState.trash[0].ID
+	persistentState.RUnlock()
+
+	request := httptest.NewRequest(http.MethodGet, "/trash/preview?id="+trashID, nil)
+	response := httptest.NewRecorder()
+	trashPreviewHandler(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("trash preview response = %d, want %d", response.Code, http.StatusOK)
+	}
+	if got := response.Header().Get("Content-Type"); got != "image/jpeg" {
+		t.Fatalf("trash preview content type = %q, want image/jpeg", got)
+	}
+	if !bytes.Equal(response.Body.Bytes(), image) {
+		t.Fatalf("trash preview body = %v, want %v", response.Body.Bytes(), image)
+	}
+}
+
 func TestBulkMoveHandlerMovesSelectedFiles(t *testing.T) {
 	useTemporaryMedia(t)
 	if err := os.Mkdir(fullPath("destination"), 0755); err != nil {
@@ -475,16 +532,38 @@ func TestPageTemplateRendersRecentViewAndHomeBreadcrumb(t *testing.T) {
 	}
 }
 
-func TestStorageCardOnlyRendersInStorageSection(t *testing.T) {
+func TestUsageCardsOnlyRenderInStorageSection(t *testing.T) {
 	for _, view := range []string{"storage", "recent"} {
 		t.Run(view, func(t *testing.T) {
 			var output bytes.Buffer
-			if err := tmpl.Execute(&output, FileData{View: view, Stats: StorageStats{}}); err != nil {
+			if err := tmpl.Execute(&output, FileData{
+				View:   view,
+				Stats:  StorageStats{},
+				Device: DeviceInfo{Hostname: "test-device", OperatingSystem: "linux", Architecture: "amd64"},
+			}); err != nil {
 				t.Fatalf("render %s page: %v", view, err)
 			}
 			containsCard := strings.Contains(output.String(), `id="storage-stats"`)
 			if containsCard != (view == "storage") {
 				t.Fatalf("storage card rendered for view %q = %t", view, containsCard)
+			}
+			containsDevice := strings.Contains(output.String(), `aria-label="Dispositivo atual"`)
+			if containsDevice != (view == "storage") {
+				t.Fatalf("device card rendered for view %q = %t", view, containsDevice)
+			}
+			containsThemeToggle := strings.Contains(output.String(), `id="theme-toggle"`)
+			if containsThemeToggle != (view == "storage") {
+				t.Fatalf("theme toggle rendered for view %q = %t", view, containsThemeToggle)
+			}
+			if view == "storage" {
+				for _, expected := range []string{"test-device", "linux", "amd64", `role="switch"`} {
+					if !strings.Contains(output.String(), expected) {
+						t.Errorf("storage page missing device information %q", expected)
+					}
+				}
+				if strings.Contains(output.String(), "Máquina:") {
+					t.Fatal("hostname still appears in the storage card")
+				}
 			}
 		})
 	}
@@ -515,6 +594,21 @@ func TestPhotoCardTemplateRendersViewerData(t *testing.T) {
 		if !strings.Contains(output.String(), expected) {
 			t.Errorf("photo card does not include %q", expected)
 		}
+	}
+}
+
+func TestPhotoCarouselShowsTitleWithoutExtension(t *testing.T) {
+	var output bytes.Buffer
+	if err := tmpl.Execute(&output, FileData{
+		View: "photos",
+		LatestPhotos: []File{
+			{Name: "summer-trip.jpg", Path: "summer-trip.jpg", Kind: "image"},
+		},
+	}); err != nil {
+		t.Fatalf("render photo carousel: %v", err)
+	}
+	if !strings.Contains(output.String(), `<span class="photo-carousel-title">summer-trip</span>`) {
+		t.Fatal("photo carousel title includes the file extension or is missing")
 	}
 }
 
@@ -561,7 +655,7 @@ func TestMobileItemMenusRenderActions(t *testing.T) {
 
 func TestTrashCardTemplatesRenderRestoreActions(t *testing.T) {
 	for name, data := range map[string]any{
-		"file":   File{Trashed: true, TrashID: "123e4567-e89b-12d3-a456-426614174000", Name: "photo.jpg"},
+		"file":   File{Trashed: true, TrashID: "123e4567-e89b-12d3-a456-426614174000", Kind: "image", Name: "photo.jpg"},
 		"folder": Folder{Trashed: true, TrashID: "123e4567-e89b-12d3-a456-426614174001", Name: "photos"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -573,6 +667,9 @@ func TestTrashCardTemplatesRenderRestoreActions(t *testing.T) {
 			if !strings.Contains(output.String(), "/trash/restore?id=") ||
 				!strings.Contains(output.String(), "/trash?id=") {
 				t.Fatalf("%s trash card is missing restore or permanent-delete action: %s", name, output.String())
+			}
+			if name == "file" && !strings.Contains(output.String(), "/trash/preview?id=") {
+				t.Fatal("trashed image preview URL is missing")
 			}
 		})
 	}
