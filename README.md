@@ -10,6 +10,14 @@ Lightweight self-hosted photo and media gallery web server built with Go and HTM
 - Trash bin with automatic retention cleanup
 - Optimized for low-resource environments (ARM32, ARM64, x86)
 
+## Installation
+
+Install the latest prebuilt binary for your platform:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lorenzolpandolfo/gollery/main/install.sh | sh
+```
+
 ## Getting Started
 
 Run directly during development:
