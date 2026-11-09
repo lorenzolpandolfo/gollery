@@ -47,6 +47,7 @@
       >
         <i class="icon-x"></i>
       </button>
+      <span id="mobile-selection-count" class="mobile-selection-count" aria-live="polite"></span>
 
       <div class="topbar-actions">
         <button
@@ -148,22 +149,6 @@
           <i class="icon-trash"></i> Esvaziar lixeira
         </button>
         {{ end }}
-      </div>
-
-      <!-- Bulk actions toolbar (hidden by default) -->
-      <div id="bulk-toolbar" class="bulk-toolbar" hidden>
-        <span id="bulk-count" class="bulk-count"></span>
-        <div class="bulk-actions">
-          <button id="bulk-download" class="btn" type="button" title="Baixar selecionados">
-            <i class="icon-download"></i> Baixar
-          </button>
-          <button id="bulk-delete" class="btn btn-danger" type="button" title="Mover para a lixeira">
-            <i class="icon-trash"></i> Lixeira
-          </button>
-          <button id="bulk-cancel" class="btn" type="button" title="Cancelar seleção">
-            Cancelar
-          </button>
-        </div>
       </div>
 
       <form
@@ -271,6 +256,27 @@
       </div>
       </div>
     </main>
+
+    <div
+      id="bulk-toolbar"
+      class="bulk-toolbar"
+      role="toolbar"
+      aria-label="Ações dos itens selecionados"
+      hidden
+    >
+      <span id="bulk-count" class="bulk-count"></span>
+      <div class="bulk-actions">
+        <button id="bulk-download" class="btn" type="button" title="Baixar selecionados">
+          <i class="icon-download"></i> Baixar
+        </button>
+        <button id="bulk-delete" class="btn btn-danger" type="button" title="Mover para a lixeira">
+          <i class="icon-trash"></i> Lixeira
+        </button>
+        <button id="bulk-cancel" class="btn" type="button" title="Cancelar seleção">
+          Cancelar
+        </button>
+      </div>
+    </div>
 
     <!-- Área de soltar arquivos -->
     <div id="drop-overlay" class="drop-overlay" hidden>
@@ -420,9 +426,9 @@
   </body>
 </html>
 
-{{ define "file-count" }}<span id="file-count" class="file-count" hx-swap-oob="true">{{ if .Search }}Resultados: {{ end }}{{ if .Folders }}{{ .Folders }} {{ if eq .Folders 1 }}pasta{{ else }}pastas{{ end }}{{ if .Files }} · {{ end }}{{ end }}{{ if or .Files (not .Folders) }}{{ .Files }} {{ if eq .Files 1 }}arquivo{{ else }}arquivos{{ end }}{{ end }}</span>{{ end }}
+{{ define "file-count" }}<span id="file-count" class="file-count" aria-live="polite" aria-atomic="true" hx-swap-oob="true">{{ if .Search }}Resultados: {{ end }}{{ if .Folders }}{{ .Folders }} {{ if eq .Folders 1 }}pasta{{ else }}pastas{{ end }}{{ if .Files }} · {{ end }}{{ end }}{{ if or .Files (not .Folders) }}{{ .Files }} {{ if eq .Files 1 }}arquivo{{ else }}arquivos{{ end }}{{ end }}</span>{{ end }}
 
-{{ define "empty-state" }}<div class="empty-state">{{ if .Query }}Nenhum resultado para “{{ .Query }}”.{{ else if eq .View "recent" }}Nenhum arquivo recente enviado na última semana.{{ else if eq .View "photos" }}Nenhuma foto encontrada.{{ else if eq .View "starred" }}Nenhum item com estrela.{{ else if eq .View "trash" }}A lixeira está vazia.{{ else }}Esta pasta está vazia.<br />Arraste arquivos para cá ou use o botão de envio.{{ end }}</div>{{ end }}
+{{ define "empty-state" }}<div class="empty-state">{{ if .Query }}<p>Nenhum resultado para “{{ .Query }}”.</p><button class="btn" type="button" data-clear-search>Limpar pesquisa</button>{{ else if eq .View "recent" }}Nenhum arquivo recente enviado na última semana.{{ else if eq .View "photos" }}Nenhuma foto encontrada.{{ else if eq .View "starred" }}Nenhum item com estrela.{{ else if eq .View "trash" }}A lixeira está vazia.{{ else }}Esta pasta está vazia.<br />Arraste arquivos para cá ou use o botão de envio.{{ end }}</div>{{ end }}
 
 {{ define "storage-stats" }}
 <section id="storage-stats" class="storage" aria-label="Armazenamento">
@@ -619,6 +625,9 @@
     <button class="card-action rename-button" type="button" title="Renomear pasta" aria-label="Renomear pasta {{ .Name }}" data-kind="folder" data-path="{{ .Path }}" data-name="{{ .Name }}">
       <i class="icon-pencil"></i><span class="mobile-action-label">Renomear</span>
     </button>
+    <button class="card-action mobile-folder-download" type="button" title="Baixar pasta" aria-label="Baixar pasta {{ .Name }}" data-path="{{ .Path }}" data-name="{{ .Name }}">
+      <i class="icon-download"></i><span class="mobile-action-label">Baixar</span>
+    </button>
     <button
       class="card-action delete-button"
       type="button"
@@ -633,9 +642,6 @@
       hx-swap="delete"
     >
       <i class="icon-trash"></i><span class="mobile-action-label">Excluir</span>
-    </button>
-    <button class="card-action mobile-folder-download" type="button" title="Baixar pasta" aria-label="Baixar pasta {{ .Name }}" data-path="{{ .Path }}" data-name="{{ .Name }}">
-      <i class="icon-download"></i><span class="mobile-action-label">Baixar</span>
     </button>
     </div>
     {{ end }}
@@ -696,8 +702,8 @@
       </span>
     </div>
 
-    <span class="file-size">{{ .SizeLabel }}</span>
     <span class="file-date">{{ if .Trashed }}Excluído {{ .TrashDateLabel }}{{ else }}{{ .DateLabel }}{{ end }}</span>
+    <span class="file-size">{{ .SizeLabel }}</span>
 
     <div class="card-actions">
       {{ if .Trashed }}

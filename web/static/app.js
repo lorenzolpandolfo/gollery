@@ -174,6 +174,14 @@
     searchTimer = setTimeout(refreshList, 300);
   });
 
+  fileList.addEventListener("click", function (e) {
+    if (!e.target.closest("[data-clear-search]")) return;
+    clearTimeout(searchTimer);
+    searchInput.value = "";
+    refreshList();
+    searchInput.focus();
+  });
+
   searchInput.addEventListener("change", function (e) {
     e.stopPropagation();
   });
@@ -739,6 +747,7 @@
 
   var bulkToolbar = $("bulk-toolbar");
   var bulkCount = $("bulk-count");
+  var mobileSelectionCount = $("mobile-selection-count");
   var bulkDownloadBtn = $("bulk-download");
   var bulkDeleteBtn = $("bulk-delete");
   var bulkCancelBtn = $("bulk-cancel");
@@ -762,9 +771,12 @@
     );
     if (count > 0) {
       bulkCount.textContent = count + " " + plural(count, "item selecionado", "itens selecionados");
+      mobileSelectionCount.textContent =
+        count + " " + plural(count, "item selecionado", "itens selecionados");
       bulkToolbar.hidden = false;
     } else {
       bulkToolbar.hidden = true;
+      mobileSelectionCount.textContent = "";
     }
   }
 
@@ -834,9 +846,10 @@
   var selectionDrag = null;
 
   var libraryView = $("library-view");
-  libraryView.addEventListener("pointerdown", function (e) {
-    if (e.pointerType !== "mouse" || e.button !== 0 ||
-        (e.target !== fileList && e.target !== libraryView)) return;
+  var mainContent = document.querySelector("main.content");
+  mainContent.addEventListener("pointerdown", function (e) {
+    if (libraryView.hidden || e.pointerType !== "mouse" || e.button !== 0 ||
+        (e.target !== fileList && e.target !== libraryView && e.target !== mainContent)) return;
 
     var additive = e.ctrlKey || e.metaKey;
     var initialSelection = new Set(selectedItems);
@@ -853,6 +866,7 @@
       initialSelection: initialSelection,
       active: false,
     };
+    root.classList.add("selection-dragging");
   });
 
   window.addEventListener("pointermove", function (e) {
@@ -897,6 +911,7 @@
     if (!selectionDrag || (e && e.pointerId !== selectionDrag.pointerId)) return;
     selectionDrag = null;
     selectionRectangle.hidden = true;
+    root.classList.remove("selection-dragging");
   }
 
   window.addEventListener("pointerup", finishSelectionDrag);
