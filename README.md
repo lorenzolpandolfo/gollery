@@ -1,6 +1,14 @@
 # Gollery
 
-Lightweight self-hosted photo and media gallery web server built with Go and HTMX.
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/5a38fe01-fb63-4534-b9a2-3403d9eb8354" alt="Gollery logo" width="220" style="border-radius: 50%;" />
+
+  <h3>A lightweight self-hosted photo and media gallery</h3>
+
+  <p>
+    Built with <strong>Go</strong> and <strong>HTMX</strong>
+  </p>
+</div>
 
 ## Features
 
