@@ -9,6 +9,15 @@
 
   var fileList = $("file-list");
 
+  fileList.addEventListener("contextmenu", function (e) {
+    if (
+      window.matchMedia("(max-width: 768px)").matches &&
+      e.target.closest(".photo-open, .file-thumb, .folder-link")
+    ) {
+      e.preventDefault();
+    }
+  });
+
   function safeGet(key) {
     try {
       return localStorage.getItem(key);
@@ -41,6 +50,32 @@
 
   function currentPath() {
     return $("path-input").value;
+  }
+
+  var lowPhotoResolution = safeGet("gollery-low-photo-resolution") === "true";
+  var photoResolutionToggle = $("photo-resolution-toggle");
+  if (photoResolutionToggle) {
+    function syncPhotoResolutionToggle() {
+      photoResolutionToggle.setAttribute("aria-checked", String(lowPhotoResolution));
+      photoResolutionToggle.setAttribute(
+        "aria-label",
+        lowPhotoResolution
+          ? "Resolução reduzida ativada"
+          : "Ativar resolução reduzida"
+      );
+      $("photo-resolution-current").textContent = lowPhotoResolution
+        ? "Ativada · menor resolução para reduzir o uso de memória e processamento."
+        : "Desativada · use em dispositivos com pouco desempenho.";
+    }
+
+    photoResolutionToggle.addEventListener("click", function () {
+      lowPhotoResolution = !lowPhotoResolution;
+      safeSet("gollery-low-photo-resolution", String(lowPhotoResolution));
+      syncPhotoResolutionToggle();
+      updateVisiblePhotoResolutions();
+    });
+
+    syncPhotoResolutionToggle();
   }
 
   /* ---------------- Tema ---------------- */
@@ -195,22 +230,28 @@
   closeOnBackdrop(folderDialog);
   closeOnBackdrop(renameDialog);
 
-  function confirmDeletion(name, isFolder, permanent) {
+  function confirmDeletion(name, isFolder, permanent, emptyTrash) {
     return new Promise(function (resolve) {
-      $("confirm-title").textContent = permanent
-        ? "Excluir definitivamente?"
-        : "Mover para a lixeira?";
+      $("confirm-title").textContent = emptyTrash
+        ? "Esvaziar lixeira?"
+        : permanent
+          ? "Excluir definitivamente?"
+          : "Mover para a lixeira?";
 
       var subject = name ? "“" + name + "”" : isFolder ? "Essa pasta" : "Esse arquivo";
 
-      $("confirm-text").textContent = permanent
-        ? (isFolder
-          ? subject + " e tudo o que está dentro dela serão excluídos permanentemente. Essa ação não pode ser desfeita."
-          : subject + " será excluído permanentemente. Essa ação não pode ser desfeita.")
-        : (isFolder
-          ? subject + " e tudo o que está dentro dela serão movidos para a lixeira e apagados após 30 dias."
-          : subject + " será movido para a lixeira e apagado após 30 dias.");
-      $("confirm-action").textContent = permanent ? "Excluir" : "Mover para lixeira";
+      $("confirm-text").textContent = emptyTrash
+        ? "Todos os itens da lixeira serão excluídos permanentemente. Essa ação não pode ser desfeita."
+        : permanent
+          ? (isFolder
+            ? subject + " e tudo o que está dentro dela serão excluídos permanentemente. Essa ação não pode ser desfeita."
+            : subject + " será excluído permanentemente. Essa ação não pode ser desfeita.")
+          : (isFolder
+            ? subject + " e tudo o que está dentro dela serão movidos para a lixeira e apagados após 30 dias."
+            : subject + " será movido para a lixeira e apagado após 30 dias.");
+      $("confirm-action").textContent = emptyTrash
+        ? "Esvaziar lixeira"
+        : permanent ? "Excluir" : "Mover para lixeira";
 
       confirmDialog.returnValue = "";
       confirmDialog.addEventListener(
@@ -234,8 +275,9 @@
     var name = elt && elt.dataset.name;
     var isFolder = !!elt && elt.dataset.kind === "folder";
     var permanent = !!elt && elt.dataset.permanent === "true";
+    var emptyTrash = !!elt && elt.dataset.emptyTrash === "true";
 
-    confirmDeletion(name, isFolder, permanent).then(function (confirmed) {
+    confirmDeletion(name, isFolder, permanent, emptyTrash).then(function (confirmed) {
       if (confirmed) e.detail.issueRequest(true);
     });
   });
@@ -972,6 +1014,8 @@
   var photoViewerStage = photoViewer.querySelector(".photo-stage");
   var activePhoto = null;
   var photoViewerTouchStart = null;
+  var photoViewerDismissTimer = null;
+  var photoViewerNavigationTimer = null;
 
   function syncPhotoViewerStar(starred) {
     photoViewerStar.dataset.starred = String(starred);
@@ -984,7 +1028,7 @@
     var label = photoViewerStar.querySelector("span");
     if (label) label.textContent = starred ? "Com estrela" : "Estrela";
     if (activePhoto) {
-      document.querySelectorAll(".photo-open").forEach(function (button) {
+      document.querySelectorAll(".photo-open, .file-image-preview").forEach(function (button) {
         if (button.dataset.path === activePhoto.dataset.path) {
           button.dataset.starred = String(starred);
         }
@@ -993,11 +1037,11 @@
   }
 
   function getPhotoCheckbox(button) {
-    var card = button.closest(".photo-tile");
+    var card = button.closest(".file-card");
     var checkbox = card && card.querySelector(".select-item");
     if (checkbox) return checkbox;
 
-    var checkboxes = fileList.querySelectorAll(".photo-tile .select-item");
+    var checkboxes = fileList.querySelectorAll(".select-item");
     for (var i = 0; i < checkboxes.length; i++) {
       if (checkboxes[i].dataset.path === button.dataset.path) return checkboxes[i];
     }
@@ -1040,10 +1084,10 @@
     photoViewer.showModal();
   }
 
-  function navigatePhotoViewer(direction) {
+  function adjacentPhoto(direction) {
     if (!activePhoto) return;
 
-    var photos = fileList.querySelectorAll(".photo-tile .photo-open");
+    var photos = fileList.querySelectorAll(".photo-tile .photo-open, .file-image-preview");
     var currentIndex = -1;
     for (var i = 0; i < photos.length; i++) {
       if (photos[i].dataset.path === activePhoto.dataset.path) {
@@ -1052,12 +1096,48 @@
       }
     }
     var nextIndex = currentIndex + direction;
-    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= photos.length) return;
-    showPhotoViewerPhoto(photos[nextIndex]);
+    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= photos.length) return null;
+    return photos[nextIndex];
+  }
+
+  function resetPhotoViewerHorizontalDrag() {
+    photoViewerStage.classList.remove(
+      "photo-viewer-horizontal-dragging",
+      "photo-viewer-horizontal-reset"
+    );
+    photoViewerStage.style.setProperty("--photo-viewer-drag-x", "0px");
+  }
+
+  function animatePhotoViewerSwipe(direction, deltaX) {
+    var nextPhoto = adjacentPhoto(direction);
+    if (!nextPhoto) {
+      resetPhotoViewerHorizontalDrag();
+      return;
+    }
+
+    photoViewerStage.classList.remove("photo-viewer-horizontal-dragging");
+    photoViewerStage.style.setProperty(
+      "--photo-viewer-drag-x",
+      deltaX < 0 ? "-100vw" : "100vw"
+    );
+    photoViewerNavigationTimer = setTimeout(function () {
+      photoViewerNavigationTimer = null;
+      if (!photoViewer.open) return;
+
+      showPhotoViewerPhoto(nextPhoto);
+      photoViewerStage.classList.add("photo-viewer-horizontal-reset");
+      photoViewerStage.style.setProperty(
+        "--photo-viewer-drag-x",
+        deltaX < 0 ? "100vw" : "-100vw"
+      );
+      photoViewerStage.offsetWidth;
+      photoViewerStage.classList.remove("photo-viewer-horizontal-reset");
+      photoViewerStage.style.setProperty("--photo-viewer-drag-x", "0px");
+    }, 180);
   }
 
   fileList.addEventListener("click", function (e) {
-    var button = e.target.closest(".photo-open");
+    var button = e.target.closest(".photo-open, .file-image-preview");
     if (button) openPhotoViewer(button);
   });
 
@@ -1070,15 +1150,53 @@
   }
 
   photoViewerStage.addEventListener("touchstart", function (e) {
-    if (e.touches.length !== 1) {
+    if (e.touches.length !== 1 || photoViewerNavigationTimer) {
       photoViewerTouchStart = null;
       return;
     }
     photoViewerTouchStart = {
       x: e.touches[0].clientX,
       y: e.touches[0].clientY,
+      draggingDown: false,
+      draggingHorizontal: false,
     };
   }, { passive: true });
+
+  photoViewerStage.addEventListener("touchmove", function (e) {
+    if (!photoViewerTouchStart || e.touches.length !== 1) return;
+
+    var deltaX = e.touches[0].clientX - photoViewerTouchStart.x;
+    var deltaY = e.touches[0].clientY - photoViewerTouchStart.y;
+    if (
+      !photoViewerTouchStart.draggingDown &&
+      !photoViewerTouchStart.draggingHorizontal
+    ) {
+      if (Math.abs(deltaX) > 8 && Math.abs(deltaX) > Math.abs(deltaY)) {
+        photoViewerTouchStart.draggingHorizontal = true;
+      } else if (deltaY > 8 && deltaY > Math.abs(deltaX)) {
+        photoViewerTouchStart.draggingDown = true;
+      } else {
+        return;
+      }
+    }
+
+    if (photoViewerTouchStart.draggingDown) {
+      e.preventDefault();
+      photoViewer.classList.add("photo-viewer-dragging");
+      photoViewer.style.setProperty(
+        "--photo-viewer-drag-y",
+        Math.max(0, deltaY) + "px"
+      );
+    } else if (photoViewerTouchStart.draggingHorizontal) {
+      e.preventDefault();
+      photoViewerStage.classList.add("photo-viewer-horizontal-dragging");
+      var hasAdjacentPhoto = !!adjacentPhoto(deltaX < 0 ? 1 : -1);
+      photoViewerStage.style.setProperty(
+        "--photo-viewer-drag-x",
+        (hasAdjacentPhoto ? deltaX : deltaX * 0.25) + "px"
+      );
+    }
+  }, { passive: false });
 
   photoViewerStage.addEventListener("touchend", function (e) {
     if (!photoViewerTouchStart || e.changedTouches.length !== 1) {
@@ -1086,16 +1204,42 @@
       return;
     }
 
+    var touchStart = photoViewerTouchStart;
     var deltaX = e.changedTouches[0].clientX - photoViewerTouchStart.x;
     var deltaY = e.changedTouches[0].clientY - photoViewerTouchStart.y;
     photoViewerTouchStart = null;
+    if (touchStart.draggingDown) {
+      photoViewer.classList.remove("photo-viewer-dragging");
+      if (deltaY > 100 && deltaY > Math.abs(deltaX)) {
+        photoViewer.classList.add("photo-viewer-dismissing");
+        photoViewer.style.setProperty("--photo-viewer-drag-y", "100vh");
+        photoViewerDismissTimer = setTimeout(function () {
+          photoViewerDismissTimer = null;
+          if (photoViewer.open) photoViewer.close();
+        }, 180);
+      } else {
+        photoViewer.style.setProperty("--photo-viewer-drag-y", "0px");
+      }
+      return;
+    }
+    if (touchStart.draggingHorizontal) {
+      if (Math.abs(deltaX) > 50 && Math.abs(deltaX) > Math.abs(deltaY)) {
+        animatePhotoViewerSwipe(deltaX < 0 ? 1 : -1, deltaX);
+      } else {
+        resetPhotoViewerHorizontalDrag();
+      }
+      return;
+    }
     if (Math.abs(deltaX) > 50 && Math.abs(deltaX) > Math.abs(deltaY)) {
-      navigatePhotoViewer(deltaX < 0 ? 1 : -1);
+      animatePhotoViewerSwipe(deltaX < 0 ? 1 : -1, deltaX);
     }
   }, { passive: true });
 
   photoViewerStage.addEventListener("touchcancel", function () {
     photoViewerTouchStart = null;
+    photoViewer.classList.remove("photo-viewer-dragging");
+    photoViewer.style.setProperty("--photo-viewer-drag-y", "0px");
+    resetPhotoViewerHorizontalDrag();
   }, { passive: true });
 
   closeOnBackdrop(photoViewer);
@@ -1105,6 +1249,18 @@
   photoViewer.addEventListener("close", function () {
     activePhoto = null;
     photoViewerTouchStart = null;
+    if (photoViewerDismissTimer) {
+      clearTimeout(photoViewerDismissTimer);
+      photoViewerDismissTimer = null;
+    }
+    if (photoViewerNavigationTimer) {
+      clearTimeout(photoViewerNavigationTimer);
+      photoViewerNavigationTimer = null;
+    }
+    photoViewer.classList.remove("photo-viewer-dragging", "photo-viewer-dismissing");
+    photoViewer.style.removeProperty("--photo-viewer-drag-y");
+    resetPhotoViewerHorizontalDrag();
+    photoViewerStage.style.removeProperty("--photo-viewer-drag-x");
     photoViewerImage.removeAttribute("src");
   });
 
@@ -1357,6 +1513,7 @@
     if (e.detail.target.id === "file-list") {
       clearSelection();
       closeMobileMenus();
+      observePhotoImages();
     }
   });
 
@@ -1385,6 +1542,53 @@
   var photoColumns = 3;
   var pinchStartDistance = 0;
   var pinchStartColumns = 3;
+  var photoResizeAnimations = new WeakMap();
+  var photoResizeFrame = 0;
+  var photoResolutionByColumns = [100, 70, 60, 50, 40, 30];
+  var lowPhotoResolutionByColumns = [70, 50, 40, 30, 20, 15];
+  var observedPhotoImages = new Set();
+  var photoResolutionObserver = typeof IntersectionObserver === "undefined"
+    ? null
+    : new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          observedPhotoImages.add(entry.target);
+          updatePhotoResolution(entry.target);
+        } else {
+          observedPhotoImages.delete(entry.target);
+        }
+      });
+    }, { rootMargin: "200px 0px" });
+
+  function updatePhotoResolution(image) {
+    if (!image.dataset.fullSrc) return;
+    var resolutions = lowPhotoResolution ? lowPhotoResolutionByColumns : photoResolutionByColumns;
+    var resolution = resolutions[photoColumns - 1];
+    if (image.dataset.resolution === String(resolution)) return;
+    image.dataset.resolution = String(resolution);
+    image.src = image.dataset.fullSrc + "?resolution=" + resolution;
+  }
+
+  function observePhotoImages() {
+    if (photoResolutionObserver) photoResolutionObserver.disconnect();
+    observedPhotoImages.clear();
+    var images = fileList.querySelectorAll(".photo-tile img[data-full-src]");
+    images.forEach(function (image) {
+      if (photoResolutionObserver) {
+        photoResolutionObserver.observe(image);
+      } else {
+        updatePhotoResolution(image);
+      }
+    });
+  }
+
+  function updateVisiblePhotoResolutions() {
+    if (photoResolutionObserver) {
+      observedPhotoImages.forEach(updatePhotoResolution);
+      return;
+    }
+    fileList.querySelectorAll(".photo-tile img[data-full-src]").forEach(updatePhotoResolution);
+  }
 
   function touchDistance(touches) {
     var dx = touches[0].clientX - touches[1].clientX;
@@ -1393,9 +1597,50 @@
   }
 
   function setPhotoColumns(columns) {
-    photoColumns = Math.max(3, Math.min(6, columns));
+    var nextColumns = Math.max(1, Math.min(6, columns));
+    if (nextColumns === photoColumns) return;
+
+    var frame = ++photoResizeFrame;
+    var previousRects = new Map();
+    observedPhotoImages.forEach(function (image) {
+      var tile = image.closest(".photo-tile");
+      if (tile) previousRects.set(tile, tile.getBoundingClientRect());
+    });
+    previousRects.forEach(function (_, tile) {
+      var animation = photoResizeAnimations.get(tile);
+      if (animation) animation.cancel();
+    });
+
+    photoColumns = nextColumns;
     fileList.style.setProperty("--photo-columns", String(photoColumns));
     fileList.setAttribute("aria-label", "Fotos, " + photoColumns + " colunas");
+    animateVisiblePhotoResize(previousRects, frame);
+  }
+
+  function animateVisiblePhotoResize(previousRects, frame) {
+    if (!previousRects.size || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+    requestAnimationFrame(function () {
+      if (frame !== photoResizeFrame) return;
+      previousRects.forEach(function (previous, tile) {
+        if (!tile.isConnected || typeof tile.animate !== "function") return;
+        var next = tile.getBoundingClientRect();
+        if (!next.width || !next.height) return;
+        var scaleX = Math.max(0.75, Math.min(1.35, previous.width / next.width));
+        var scaleY = Math.max(0.75, Math.min(1.35, previous.height / next.height));
+        var animation = tile.animate([
+          {
+            transformOrigin: "center",
+            transform: "translate(" +
+              (previous.left + previous.width / 2 - next.left - next.width / 2) + "px, " +
+              (previous.top + previous.height / 2 - next.top - next.height / 2) + "px) " +
+              "scale(" + scaleX + ", " + scaleY + ")"
+          },
+          { transformOrigin: "center", transform: "translate(0, 0) scale(1, 1)" }
+        ], { duration: 170, easing: "ease-out" });
+        photoResizeAnimations.set(tile, animation);
+      });
+    });
   }
 
   fileList.addEventListener("touchstart", function (e) {
@@ -1408,7 +1653,11 @@
       longPressTimer = null;
     }
     touchSelectionActive = false;
-    if (touchDragSource) touchDragSource.card.classList.remove("dragging");
+    if (touchDragSource) {
+      stopTouchDragAutoScroll();
+      touchDragSource.card.classList.remove("dragging");
+      restoreTouchDragSourceDraggable(touchDragSource);
+    }
     if (touchDragDelayTimer) {
       clearTimeout(touchDragDelayTimer);
       touchDragDelayTimer = null;
@@ -1423,7 +1672,7 @@
     e.preventDefault();
     var distanceChange = pinchStartDistance - touchDistance(e.touches);
     var steps = Math.trunc(distanceChange / 45);
-    var columns = Math.max(3, Math.min(6, pinchStartColumns + steps));
+    var columns = Math.max(1, Math.min(6, pinchStartColumns + steps));
     if (columns !== photoColumns) setPhotoColumns(columns);
   }, { passive: false });
 
@@ -1431,10 +1680,12 @@
     if (!pinchStartDistance || (e.type !== "touchcancel" && e.touches.length >= 2)) return;
     if (e.cancelable) e.preventDefault();
     pinchStartDistance = 0;
+    updateVisiblePhotoResolutions();
   }
 
   fileList.addEventListener("touchend", endPhotoPinch, { passive: false });
   fileList.addEventListener("touchcancel", endPhotoPinch, { passive: false });
+  observePhotoImages();
 
   function isInvalidMoveTarget(items, targetPath) {
     return items.some(function (item) {
@@ -1678,7 +1929,7 @@
         !(fileList.classList.contains("photo-mosaic") && card.matches(".photo-tile"))) return;
 
     // O botão da miniatura também permite selecionar por toque prolongado.
-    if ((e.target.closest("button") && !e.target.closest(".photo-open")) ||
+    if ((e.target.closest("button") && !e.target.closest(".photo-open, .file-image-preview")) ||
         e.target.closest("label") || e.target === checkbox) return;
 
     isLongPress = false;
@@ -1744,7 +1995,140 @@
   var touchDragStartX = 0;
   var touchDragStartY = 0;
   var touchDragThreshold = 10; // pixels
-  var touchDragDelay = 1000; // Em mobile, exige um toque parado antes de arrastar.
+  var touchDragDelay = longPressThreshold; // Arrastar começa após o mesmo tempo do toque prolongado.
+  var touchDragAutoScrollFrame = null;
+  var touchDragAutoScrollLastTime = 0;
+  var touchDragClientX = 0;
+  var touchDragClientY = 0;
+
+  function restoreTouchDragSourceDraggable(source) {
+    if (source.wasDraggable === null) source.card.removeAttribute("draggable");
+    else source.card.setAttribute("draggable", source.wasDraggable);
+    if (source.anchor) {
+      if (source.wasAnchorDraggable === null) source.anchor.removeAttribute("draggable");
+      else source.anchor.setAttribute("draggable", source.wasAnchorDraggable);
+    }
+  }
+
+  function findTouchDragHorizontalScrollElement(card) {
+    for (var element = card; element && element !== document.body &&
+        element !== document.documentElement; element = element.parentElement) {
+      var overflowX = window.getComputedStyle(element).overflowX;
+      if (
+        (overflowX === "auto" || overflowX === "scroll" || overflowX === "overlay" || overflowX === "hidden") &&
+        element.scrollWidth > element.clientWidth + 1
+      ) return element;
+    }
+
+    var rootScroller = document.scrollingElement || document.documentElement;
+    return rootScroller.scrollWidth > rootScroller.clientWidth + 1 ? rootScroller : null;
+  }
+
+  function touchDragHorizontalEdge() {
+    var element = touchDragSource && touchDragSource.horizontalScrollElement;
+    if (!element) return null;
+
+    var isRootScroller = element === document.scrollingElement ||
+      element === document.documentElement;
+    var bounds = isRootScroller
+      ? { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight, width: window.innerWidth }
+      : element.getBoundingClientRect();
+    var edgeSize = Math.min(128, Math.max(64, bounds.width * 0.2));
+    if (touchDragClientY < bounds.top || touchDragClientY > bounds.bottom) return null;
+
+    var direction = touchDragClientX < bounds.left + edgeSize
+      ? -1
+      : touchDragClientX > bounds.right - edgeSize ? 1 : 0;
+    if (!direction) return null;
+    var distance = direction < 0
+      ? bounds.left + edgeSize - touchDragClientX
+      : touchDragClientX - (bounds.right - edgeSize);
+    return { element: element, direction: direction, edgeSize: edgeSize, distance: distance };
+  }
+
+  function stopTouchDragAutoScroll() {
+    if (touchDragAutoScrollFrame !== null) {
+      cancelAnimationFrame(touchDragAutoScrollFrame);
+      touchDragAutoScrollFrame = null;
+    }
+    touchDragAutoScrollLastTime = 0;
+  }
+
+  function scrollTouchDragAtEdge(timestamp) {
+    touchDragAutoScrollFrame = null;
+    if (!touchDragSource || !touchDragSource.dragging) return;
+
+    var verticalEdgeSize = Math.min(128, Math.max(64, window.innerHeight * 0.2));
+    var verticalDirection = touchDragClientY < verticalEdgeSize
+      ? -1
+      : touchDragClientY > window.innerHeight - verticalEdgeSize ? 1 : 0;
+    var horizontalEdge = touchDragHorizontalEdge();
+    if (!verticalDirection && !horizontalEdge) return;
+
+    var elapsed = touchDragAutoScrollLastTime
+      ? Math.min(32, timestamp - touchDragAutoScrollLastTime)
+      : 16.67;
+    touchDragAutoScrollLastTime = timestamp;
+    var verticalEdgeDistance = verticalDirection < 0
+      ? verticalEdgeSize - touchDragClientY
+      : touchDragClientY - (window.innerHeight - verticalEdgeSize);
+    var verticalSpeed = verticalDirection
+      ? 240 + Math.min(1, verticalEdgeDistance / verticalEdgeSize) * 960
+      : 0;
+    var scrollElement = document.scrollingElement || document.documentElement;
+    var maxScrollTop = scrollElement.scrollHeight - scrollElement.clientHeight;
+    var nextScrollTop = verticalDirection
+      ? Math.max(0, Math.min(
+          maxScrollTop,
+          scrollElement.scrollTop + verticalDirection * verticalSpeed * elapsed / 1000
+        ))
+      : scrollElement.scrollTop;
+    var nextScrollLeft = scrollElement.scrollLeft;
+    if (horizontalEdge) {
+      var horizontalSpeed =
+        2 * (240 + Math.min(1, horizontalEdge.distance / horizontalEdge.edgeSize) * 960);
+      var maxScrollLeft = horizontalEdge.element.scrollWidth - horizontalEdge.element.clientWidth;
+      nextScrollLeft = Math.max(
+        0,
+        Math.min(
+          maxScrollLeft,
+          horizontalEdge.element.scrollLeft +
+            horizontalEdge.direction * horizontalSpeed * elapsed / 1000
+        )
+      );
+    }
+    if (
+      nextScrollTop === scrollElement.scrollTop &&
+      (!horizontalEdge || nextScrollLeft === horizontalEdge.element.scrollLeft)
+    ) return;
+
+    scrollElement.scrollTop = nextScrollTop;
+    if (horizontalEdge) horizontalEdge.element.scrollLeft = nextScrollLeft;
+    updateTouchDragPreviewPosition({
+      clientX: touchDragClientX,
+      clientY: touchDragClientY,
+    });
+    updateTouchDragOverFolder({
+      clientX: touchDragClientX,
+      clientY: touchDragClientY,
+    });
+    touchDragAutoScrollFrame = requestAnimationFrame(scrollTouchDragAtEdge);
+  }
+
+  function updateTouchDragAutoScroll(touch) {
+    touchDragClientX = touch.clientX;
+    touchDragClientY = touch.clientY;
+    var verticalEdgeSize = Math.min(128, Math.max(64, window.innerHeight * 0.2));
+    var nearVerticalEdge = touchDragClientY < verticalEdgeSize ||
+      touchDragClientY > window.innerHeight - verticalEdgeSize;
+    var nearHorizontalEdge = !!touchDragHorizontalEdge();
+    var nearEdge = nearVerticalEdge || nearHorizontalEdge;
+    if (nearEdge && touchDragAutoScrollFrame === null) {
+      touchDragAutoScrollFrame = requestAnimationFrame(scrollTouchDragAtEdge);
+    } else if (!nearEdge) {
+      stopTouchDragAutoScroll();
+    }
+  }
 
   function clearTouchDragPreview() {
     if (touchDragPreview) {
@@ -1815,7 +2199,8 @@
   }
 
   fileList.addEventListener("touchstart", function (e) {
-    if (isLongPress || e.touches.length > 1) return; // Não inicia drag em gesto de pinça
+    if (fileList.classList.contains("photo-mosaic") ||
+        isLongPress || e.touches.length > 1) return; // Fotos não podem ser arrastadas no mosaico
 
     var card = e.target.closest(".file-card");
     if (!card) return;
@@ -1823,18 +2208,37 @@
     var checkbox = card.querySelector(".select-item");
     if (!checkbox) return;
 
-    // Não inicia drag se tocou em botão ou checkbox.
-    if (e.target.closest("button") || e.target.closest("label") || e.target === checkbox) return;
+    // Miniaturas de imagem selecionadas também podem iniciar touch drag.
+    var selectedImagePreview = checkbox.checked &&
+      e.target.closest(".photo-open, .file-image-preview");
+    if (
+      (e.target.closest("button") && !selectedImagePreview) ||
+      e.target.closest("label") ||
+      e.target === checkbox
+    ) return;
 
     if (touchDragDelayTimer) {
       clearTimeout(touchDragDelayTimer);
       touchDragDelayTimer = null;
     }
 
-    var requiresLongPress = window.matchMedia("(max-width: 768px)").matches;
+    var isMobileTouch = window.matchMedia("(max-width: 768px)").matches;
+    var selectedForDrag = selectedItems.size > 0 && checkbox.checked;
+    var requiresLongPress = isMobileTouch && !selectedForDrag;
+    var anchor = e.target.closest("a");
+    var wasDraggable = card.getAttribute("draggable");
+    var wasAnchorDraggable = anchor ? anchor.getAttribute("draggable") : null;
+    if (isMobileTouch) {
+      card.setAttribute("draggable", "false");
+      if (anchor) anchor.setAttribute("draggable", "false");
+    }
     touchDragSource = {
       card: card,
       checkbox: checkbox,
+      anchor: anchor,
+      wasDraggable: wasDraggable,
+      wasAnchorDraggable: wasAnchorDraggable,
+      horizontalScrollElement: findTouchDragHorizontalScrollElement(card),
       startX: e.touches[0].clientX,
       startY: e.touches[0].clientY,
       dragging: false,
@@ -1856,15 +2260,19 @@
     var deltaX = e.touches[0].clientX - touchDragSource.startX;
     var deltaY = e.touches[0].clientY - touchDragSource.startY;
     var distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+    var movingSelection = selectedItems.size > 0 && touchDragSource.checkbox.checked;
 
     if (!touchDragSource.dragReady && distance > 4) {
       if (touchDragDelayTimer) {
         clearTimeout(touchDragDelayTimer);
         touchDragDelayTimer = null;
       }
+      restoreTouchDragSourceDraggable(touchDragSource);
       touchDragSource = null;
       return;
     }
+
+    if (movingSelection && distance > 4) e.preventDefault();
 
     if (distance > touchDragThreshold) {
       if (!touchDragSource.dragging) {
@@ -1875,15 +2283,18 @@
       updateTouchDragPreviewPosition(e.touches[0]);
       e.preventDefault(); // Impede scroll
       updateTouchDragOverFolder(e.touches[0]);
+      updateTouchDragAutoScroll(e.touches[0]);
     }
   }, { passive: false });
 
   fileList.addEventListener("touchend", function (e) {
+    stopTouchDragAutoScroll();
     if (!touchDragSource) return;
 
     var card = touchDragSource.card;
     var checkbox = touchDragSource.checkbox;
     var wasDragging = touchDragSource.dragging;
+    restoreTouchDragSourceDraggable(touchDragSource);
 
     if (touchDragDelayTimer) {
       clearTimeout(touchDragDelayTimer);
@@ -1896,6 +2307,7 @@
     touchDragSource = null;
 
     if (!wasDragging) return;
+    e.preventDefault();
 
     // Verifica se soltou sobre uma pasta ou breadcrumb
     var touch = e.changedTouches[0];
@@ -1935,8 +2347,10 @@
 
   // Cleanup touch drag no cancelamento
   window.addEventListener("touchcancel", function () {
+    stopTouchDragAutoScroll();
     if (touchDragSource) {
       touchDragSource.card.classList.remove("dragging");
+      restoreTouchDragSourceDraggable(touchDragSource);
       touchDragSource = null;
     }
     if (touchDragDelayTimer) {

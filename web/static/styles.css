@@ -347,6 +347,27 @@ html[data-theme="dark"] .theme-icon-light {
   gap: 6px;
 }
 
+.storage-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.storage-action:hover .storage-action-label {
+  text-decoration: underline;
+}
+
+.storage-action-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+  font-size: 13px;
+}
+
 .device-info-details {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -396,7 +417,8 @@ html[data-theme="dark"] .theme-icon-light {
   color: var(--muted);
 }
 
-.theme-switch {
+.theme-switch,
+.setting-switch {
   flex: 0 0 auto;
   padding: 0;
   background: transparent;
@@ -404,7 +426,8 @@ html[data-theme="dark"] .theme-icon-light {
   cursor: pointer;
 }
 
-.theme-switch-track {
+.theme-switch-track,
+.setting-switch-track {
   display: flex;
   align-items: center;
   width: 52px;
@@ -418,7 +441,8 @@ html[data-theme="dark"] .theme-icon-light {
     border-color 180ms ease;
 }
 
-.theme-switch-thumb {
+.theme-switch-thumb,
+.setting-switch-thumb {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -431,7 +455,8 @@ html[data-theme="dark"] .theme-icon-light {
   transition: transform 180ms ease;
 }
 
-.theme-switch-thumb i {
+.theme-switch-thumb i,
+.setting-switch-thumb i {
   font-size: 14px;
 }
 
@@ -439,7 +464,12 @@ html[data-theme="dark"] .theme-switch-thumb {
   transform: translateX(20px);
 }
 
-.theme-switch:focus-visible {
+.setting-switch[aria-checked="true"] .setting-switch-thumb {
+  transform: translateX(20px);
+}
+
+.theme-switch:focus-visible,
+.setting-switch:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
   border-radius: 999px;
@@ -862,6 +892,16 @@ dialog.photo-viewer {
   color: #fff;
   background: #101114;
   border: 0;
+  transform: translateY(var(--photo-viewer-drag-y, 0));
+  transition: transform 180ms ease, opacity 180ms ease;
+}
+
+dialog.photo-viewer.photo-viewer-dragging {
+  transition: none;
+}
+
+dialog.photo-viewer.photo-viewer-dismissing {
+  opacity: 0;
 }
 
 dialog.photo-viewer::backdrop {
@@ -901,7 +941,14 @@ dialog.photo-viewer::backdrop {
   min-height: 0;
   margin: 0;
   padding: 24px;
-  touch-action: pan-y;
+  transform: translateX(var(--photo-viewer-drag-x, 0));
+  transition: transform 180ms ease;
+  touch-action: none;
+}
+
+.photo-stage.photo-viewer-horizontal-dragging,
+.photo-stage.photo-viewer-horizontal-reset {
+  transition: none;
 }
 
 .photo-stage img {
@@ -1052,6 +1099,9 @@ html[data-view="list"] .gallery.photo-mosaic {
   background: transparent;
   border: 0;
   cursor: zoom-in;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .gallery.photo-mosaic .photo-open img {
@@ -1060,6 +1110,9 @@ html[data-view="list"] .gallery.photo-mosaic {
   height: 100%;
   object-fit: cover;
   transition: transform 0.2s ease;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .photo-open:hover img {
@@ -1084,8 +1137,22 @@ html[data-view="list"] .gallery.photo-mosaic {
 }
 
 .file-thumb {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
   display: block;
   text-decoration: none;
+}
+
+.file-image-preview {
+  width: 100%;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: zoom-in;
 }
 
 .file-card img,
@@ -1094,6 +1161,12 @@ html[data-view="list"] .gallery.photo-mosaic {
   height: 260px;
   object-fit: cover;
   display: block;
+}
+
+.file-card img {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .file-card-not-media {
@@ -1333,6 +1406,14 @@ html[data-view="list"] .file-card.folder-card {
 
   padding: 14px 8px 14px 14px;
   text-decoration: none;
+}
+
+@media (max-width: 768px) {
+  .folder-link {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
 }
 
 .folder-icon {
@@ -1909,6 +1990,14 @@ html[data-view="list"] .file-card.drag-over {
 }
 
 @media (max-width: 768px) {
+  .file-name,
+  .file-location,
+  .folder-link {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
   .topbar {
     min-height: 65px;
     padding: 12px 16px;
@@ -1966,6 +2055,10 @@ html[data-view="list"] .file-card.drag-over {
 
   .library-nav-link i {
     font-size: 20px;
+  }
+
+  .trash-nav-link {
+    display: none;
   }
 
   html[data-view="list"] .gallery.menu-open {

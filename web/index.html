@@ -107,7 +107,7 @@
       <a class="library-nav-link{{ if eq .View "starred" }} active{{ end }}" href="/?view=starred">
         <i class="icon-star"></i><span>Favoritos</span>
       </a>
-      <a class="library-nav-link{{ if eq .View "trash" }} active{{ end }}" href="/?view=trash">
+      <a class="library-nav-link trash-nav-link{{ if eq .View "trash" }} active{{ end }}" href="/?view=trash">
         <i class="icon-trash"></i><span>Lixeira</span>
       </a>
       <a class="library-nav-link{{ if eq .View "storage" }} active{{ end }}" href="/?view=storage">
@@ -119,7 +119,10 @@
       {{ if eq .View "storage" }}
       {{ template "storage-stats" .Stats }}
       {{ template "device-info" .Device }}
+      {{ template "build-info" .BuildVersion }}
       {{ template "theme-setting" }}
+      {{ template "photo-resolution-setting" }}
+      {{ template "storage-trash-link" }}
       {{ end }}
       <div id="library-view" {{ if eq .View "storage" }}hidden{{ end }}>
 
@@ -129,7 +132,22 @@
           {{ template "file-count" .Count }}
           {{ if eq .View "trash" }}<span class="trash-hint">Os itens são excluídos definitivamente após 30 dias.</span>{{ end }}
         </div>
-
+        {{ if eq .View "trash" }}
+        <button
+          id="empty-trash"
+          class="btn btn-danger"
+          type="button"
+          data-empty-trash="true"
+          hx-post="/trash/empty?view=trash"
+          hx-include="#sort-form"
+          hx-target="#file-list"
+          hx-swap="innerHTML"
+          hx-confirm="Esvaziar a lixeira?"
+          title="Excluir definitivamente todos os itens da lixeira"
+        >
+          <i class="icon-trash"></i> Esvaziar lixeira
+        </button>
+        {{ end }}
       </div>
 
       <!-- Bulk actions toolbar (hidden by default) -->
@@ -444,6 +462,24 @@
 </section>
 {{ end }}
 
+{{ define "build-info" }}
+<section class="storage build-info" aria-label="Versão da build">
+  <div class="storage-head">
+    <span class="storage-title"><i class="icon-hard-drive"></i> Versão da build</span>
+    <span class="storage-numbers">{{ . }}</span>
+  </div>
+</section>
+{{ end }}
+
+{{ define "storage-trash-link" }}
+<section class="storage storage-trash-link" aria-label="Lixeira">
+  <a id="storage-trash-link" class="storage-action" href="/?view=trash">
+    <span class="storage-title"><i class="icon-trash"></i> Lixeira</span>
+    <span class="storage-action-label">Abrir lixeira <i class="icon-chevron-right"></i></span>
+  </a>
+</section>
+{{ end }}
+
 {{ define "theme-setting" }}
 <section class="storage theme-setting" aria-label="Tema da interface">
   <div class="storage-head">
@@ -473,6 +509,32 @@
 </section>
 {{ end }}
 
+{{ define "photo-resolution-setting" }}
+<section class="storage theme-setting" aria-label="Desempenho das fotos">
+  <div class="storage-head">
+    <span class="storage-title"><i class="icon-image"></i> Desempenho</span>
+  </div>
+  <div class="theme-setting-row">
+    <div class="theme-setting-copy">
+      <strong>Resolução reduzida nas Fotos</strong>
+      <span id="photo-resolution-current">Desativada · use em dispositivos com pouco desempenho.</span>
+    </div>
+    <button
+      id="photo-resolution-toggle"
+      class="setting-switch"
+      type="button"
+      role="switch"
+      aria-checked="false"
+      aria-label="Ativar resolução reduzida"
+    >
+      <span class="setting-switch-track">
+        <span class="setting-switch-thumb"><i class="icon-image"></i></span>
+      </span>
+    </button>
+  </div>
+</section>
+{{ end }}
+
 {{ define "photo-card" }}
 <figure class="file-card photo-tile">
   <label class="card-checkbox" title="Selecionar foto">
@@ -491,7 +553,13 @@
     data-starred="{{ .Starred }}"
     aria-label="Visualizar {{ .Name }}"
   >
-    <img loading="lazy" src="{{ .URL }}" alt="{{ .Name }}" />
+    <img
+      loading="lazy"
+      src="{{ .URL }}?resolution=60"
+      data-full-src="{{ .URL }}"
+      data-resolution="60"
+      alt="{{ .Name }}"
+    />
   </button>
 </figure>
 {{ end }}
@@ -583,21 +651,34 @@
     <i class="icon-check"></i>
   </label>
   {{ end }}
-  {{ if .Trashed }}<div class="file-thumb">{{ else }}<a class="file-thumb" href="{{ .URL }}" target="_blank" rel="noopener">{{ end }}
+  {{ if .Trashed }}<div class="file-thumb">{{ else if eq .Kind "image" }}
+  <button
+    class="file-thumb file-image-preview"
+    type="button"
+    data-path="{{ .Path }}"
+    data-name="{{ .Name }}"
+    data-url="{{ .URL }}"
+    data-size="{{ .SizeLabel }}"
+    data-date="{{ .DateLabel }}"
+    data-location="{{ .Location }}"
+    data-starred="{{ .Starred }}"
+    aria-label="Visualizar {{ .Name }}"
+  >
+  {{ else }}<a class="file-thumb" href="{{ .URL }}" target="_blank" rel="noopener">{{ end }}
     {{ if .Trashed }}
       {{ if eq .Kind "image" }}
-      <img loading="lazy" src="{{ .TrashPreviewURL }}" alt="{{ .Name }}" />
+      <img loading="lazy" draggable="false" src="{{ .TrashPreviewURL }}" alt="{{ .Name }}" />
       {{ else }}
       <div class="file-card-not-media">{{ .Ext }}</div>
       {{ end }}
     {{ else if eq .Kind "video" }}
     <video muted preload="metadata" src="{{ .URL }}"></video>
     {{ else if eq .Kind "image" }}
-    <img loading="lazy" src="{{ .URL }}" alt="{{ .Name }}" />
+    <img loading="lazy" draggable="false" src="{{ .URL }}" alt="{{ .Name }}" />
     {{ else }}
     <div class="file-card-not-media">{{ .Ext }}</div>
     {{ end }}
-  {{ if .Trashed }}</div>{{ else }}</a>{{ end }}
+  {{ if .Trashed }}</div>{{ else if eq .Kind "image" }}</button>{{ else }}</a>{{ end }}
 
   <div class="card-footer">
     <div class="file-info">

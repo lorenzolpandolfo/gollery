@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -449,6 +452,36 @@ func TestTrashRestorePermanentDeleteAndExpiry(t *testing.T) {
 	}
 }
 
+func TestEmptyTrashHandlerDeletesAllItems(t *testing.T) {
+	useTemporaryMedia(t)
+	for _, filePath := range []string{
+		"123e4567-e89b-12d3-a456-426614174000__first.jpg",
+		"123e4567-e89b-12d3-a456-426614174001__second.jpg",
+	} {
+		if err := os.WriteFile(fullPath(filePath), []byte("photo"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := moveToTrash("file", filePath); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/trash/empty?view=trash", nil)
+	response := httptest.NewRecorder()
+	emptyTrashHandler(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("empty trash response = %d %q", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "A lixeira está vazia.") {
+		t.Fatalf("empty trash response does not show the empty state: %q", response.Body.String())
+	}
+	persistentState.RLock()
+	defer persistentState.RUnlock()
+	if len(persistentState.trash) != 0 {
+		t.Fatalf("trash still contains %d items", len(persistentState.trash))
+	}
+}
+
 func TestTrashPreviewServesTrashedImage(t *testing.T) {
 	useTemporaryMedia(t)
 	filePath := "123e4567-e89b-12d3-a456-426614174000__photo.jpg"
@@ -537,9 +570,10 @@ func TestUsageCardsOnlyRenderInStorageSection(t *testing.T) {
 		t.Run(view, func(t *testing.T) {
 			var output bytes.Buffer
 			if err := tmpl.Execute(&output, FileData{
-				View:   view,
-				Stats:  StorageStats{},
-				Device: DeviceInfo{Hostname: "test-device", OperatingSystem: "linux", Architecture: "amd64"},
+				View:         view,
+				Stats:        StorageStats{},
+				Device:       DeviceInfo{Hostname: "test-device", OperatingSystem: "linux", Architecture: "amd64"},
+				BuildVersion: buildVersion,
 			}); err != nil {
 				t.Fatalf("render %s page: %v", view, err)
 			}
@@ -555,8 +589,20 @@ func TestUsageCardsOnlyRenderInStorageSection(t *testing.T) {
 			if containsThemeToggle != (view == "storage") {
 				t.Fatalf("theme toggle rendered for view %q = %t", view, containsThemeToggle)
 			}
+			containsPhotoResolutionToggle := strings.Contains(output.String(), `id="photo-resolution-toggle"`)
+			if containsPhotoResolutionToggle != (view == "storage") {
+				t.Fatalf("photo resolution toggle rendered for view %q = %t", view, containsPhotoResolutionToggle)
+			}
+			containsBuildVersion := strings.Contains(output.String(), `aria-label="Versão da build"`)
+			if containsBuildVersion != (view == "storage") {
+				t.Fatalf("build version rendered for view %q = %t", view, containsBuildVersion)
+			}
+			containsTrashLink := strings.Contains(output.String(), `id="storage-trash-link"`)
+			if containsTrashLink != (view == "storage") {
+				t.Fatalf("storage trash link rendered for view %q = %t", view, containsTrashLink)
+			}
 			if view == "storage" {
-				for _, expected := range []string{"test-device", "linux", "amd64", `role="switch"`} {
+				for _, expected := range []string{"test-device", "linux", "amd64", "5", `role="switch"`} {
 					if !strings.Contains(output.String(), expected) {
 						t.Errorf("storage page missing device information %q", expected)
 					}
@@ -590,10 +636,129 @@ func TestPhotoCardTemplateRendersViewerData(t *testing.T) {
 		`data-path="album/photo.jpg"`,
 		`data-name="photo.jpg"`,
 		`src="/media/album/photo.jpg"`,
+		`src="/media/album/photo.jpg?resolution=60"`,
+		`data-full-src="/media/album/photo.jpg"`,
 	} {
 		if !strings.Contains(output.String(), expected) {
 			t.Errorf("photo card does not include %q", expected)
 		}
+	}
+}
+
+func TestMediaHandlerServesScaledImage(t *testing.T) {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(workingDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	if err := os.Mkdir(mediaDirectory, 0755); err != nil {
+		t.Fatal(err)
+	}
+	var source bytes.Buffer
+	input := image.NewRGBA(image.Rect(0, 0, 100, 50))
+	for y := 0; y < 50; y++ {
+		for x := 0; x < 100; x++ {
+			input.Set(x, y, color.RGBA{R: 80, G: 120, B: 200, A: 255})
+		}
+	}
+	if err := png.Encode(&source, input); err != nil {
+		t.Fatal(err)
+	}
+	path := "123e4567-e89b-12d3-a456-426614174000__photo.png"
+	if err := os.WriteFile(fullPath(path), source.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/media/"+path+"?resolution=30", nil)
+	response := httptest.NewRecorder()
+	mediaHandler(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("media response = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if got := response.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("Content-Type = %q, want image/png", got)
+	}
+	decoded, err := png.Decode(response.Body)
+	if err != nil {
+		t.Fatalf("decode scaled image: %v", err)
+	}
+	if got := decoded.Bounds().Size(); got != (image.Point{X: 30, Y: 15}) {
+		t.Fatalf("scaled bounds = %v, want 30x15", got)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/media/"+path+"?resolution=15", nil)
+	response = httptest.NewRecorder()
+	mediaHandler(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("low-resolution response = %d, want %d", response.Code, http.StatusOK)
+	}
+	decoded, err = png.Decode(response.Body)
+	if err != nil {
+		t.Fatalf("decode low-resolution image: %v", err)
+	}
+	if got := decoded.Bounds().Size(); got != (image.Point{X: 15, Y: 7}) {
+		t.Fatalf("low-resolution bounds = %v, want 15x7", got)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/media/"+path+"?resolution=55", nil)
+	response = httptest.NewRecorder()
+	mediaHandler(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid resolution response = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+}
+
+func TestOrientImageRotatesJPEGPixels(t *testing.T) {
+	input := image.NewRGBA(image.Rect(0, 0, 2, 3))
+	for y := 0; y < 3; y++ {
+		for x := 0; x < 2; x++ {
+			input.Set(x, y, color.RGBA{R: uint8(y*2 + x + 1), A: 255})
+		}
+	}
+
+	got := orientImage(input, 6)
+	if got.Bounds().Size() != (image.Point{X: 3, Y: 2}) {
+		t.Fatalf("oriented bounds = %v, want 3x2", got.Bounds().Size())
+	}
+	for y := 0; y < 2; y++ {
+		for x := 0; x < 3; x++ {
+			want := input.At(y, 2-x)
+			if got.At(x, y) != want {
+				t.Errorf("oriented pixel (%d,%d) = %v, want %v", x, y, got.At(x, y), want)
+			}
+		}
+	}
+}
+
+func TestImageFileCardOpensPhotoViewer(t *testing.T) {
+	var output bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&output, "file-card", File{
+		Name: "photo.jpg",
+		Path: "album/photo.jpg",
+		Kind: "image",
+	}); err != nil {
+		t.Fatalf("render image file card: %v", err)
+	}
+	for _, expected := range []string{
+		`class="file-thumb file-image-preview"`,
+		`data-path="album/photo.jpg"`,
+		`data-name="photo.jpg"`,
+		`data-url="/media/album/photo.jpg"`,
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Errorf("image file card does not include %q", expected)
+		}
+	}
+	if strings.Contains(output.String(), `target="_blank"`) {
+		t.Fatal("image preview still opens in a new tab")
 	}
 }
 

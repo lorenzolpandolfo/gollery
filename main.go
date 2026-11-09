@@ -6,12 +6,16 @@ import (
 	"context"
 	"crypto/rand"
 	"embed"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"html/template"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"io/fs"
 	"log"
@@ -30,6 +34,10 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+
+	_ "golang.org/x/image/bmp"
+	imagedraw "golang.org/x/image/draw"
+	_ "golang.org/x/image/webp"
 )
 
 const (
@@ -44,6 +52,8 @@ const (
 )
 
 var (
+	buildVersion = "5"
+
 	errInsufficientStorage = errors.New("not enough free storage space")
 
 	videoExtensions = map[string]bool{
@@ -202,6 +212,7 @@ type FileData struct {
 	Count        ViewCount
 	Stats        StorageStats
 	Device       DeviceInfo
+	BuildVersion string
 	View         string
 	Path         string
 	Crumbs       []Crumb
@@ -310,6 +321,7 @@ func main() {
 	mux.HandleFunc("/rename", renameHandler)
 	mux.HandleFunc("/trash/restore", restoreTrashHandler)
 	mux.HandleFunc("/trash/preview", trashPreviewHandler)
+	mux.HandleFunc("/trash/empty", emptyTrashHandler)
 	mux.HandleFunc("/trash", trashHandler)
 	mux.HandleFunc("/delete", deleteHandler)
 	mux.HandleFunc("/bulk-delete", bulkDeleteHandler)
@@ -1229,6 +1241,33 @@ func trashHandler(w http.ResponseWriter, r *http.Request) {
 	renderOOBOnly(w, r)
 }
 
+func emptyTrashHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	persistentState.RLock()
+	ids := make([]string, 0, len(persistentState.trash))
+	for _, item := range persistentState.trash {
+		ids = append(ids, item.ID)
+	}
+	persistentState.RUnlock()
+
+	for _, id := range ids {
+		if err := permanentlyDeleteTrashItem(id); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			log.Printf("empty trash error for %s: %v", id, err)
+			http.Error(w, "unable to empty trash", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	invalidateStats()
+	renderList(w, r)
+}
+
 /* ------------------------------------------------------------------ */
 /* Pedido de visualização, ordenação e pesquisa                       */
 /* ------------------------------------------------------------------ */
@@ -2101,6 +2140,7 @@ func renderPage(w http.ResponseWriter, r *http.Request) {
 		Count:        view.Count,
 		Stats:        buildStats(),
 		Device:       device,
+		BuildVersion: buildVersion,
 		View:         request.View,
 		Path:         request.Path,
 		Crumbs:       buildCrumbs(request.Path),
@@ -3068,7 +3108,229 @@ func mediaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if resolution := r.URL.Query().Get("resolution"); resolution != "" &&
+		r.URL.Query().Get("download") != "1" {
+		percent, ok := photoResolutionPercent(resolution)
+		if !ok {
+			http.Error(w, "invalid image resolution", http.StatusBadRequest)
+			return
+		}
+		if file.Kind != "image" {
+			http.Error(w, "resolution is only available for images", http.StatusBadRequest)
+			return
+		}
+		ext := strings.ToLower(filepath.Ext(file.Name))
+		if percent < 100 && ext != ".gif" && ext != ".svg" {
+			if err := serveScaledPhoto(w, r, file, percent); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					http.NotFound(w, r)
+					return
+				}
+				log.Printf("scaled photo error (%s): %v", file.Path, err)
+				http.Error(w, "unable to resize image", http.StatusInternalServerError)
+			}
+			return
+		}
+	}
+
 	serveStoredFile(w, r, file, r.URL.Query().Get("download") == "1")
+}
+
+func photoResolutionPercent(value string) (int, bool) {
+	switch value {
+	case "15":
+		return 15, true
+	case "20":
+		return 20, true
+	case "30":
+		return 30, true
+	case "40":
+		return 40, true
+	case "50":
+		return 50, true
+	case "60":
+		return 60, true
+	case "70":
+		return 70, true
+	case "100":
+		return 100, true
+	default:
+		return 0, false
+	}
+}
+
+func serveScaledPhoto(w http.ResponseWriter, r *http.Request, file File, percent int) error {
+	src, err := os.Open(fullPath(file.Path))
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	info, err := src.Stat()
+	if err != nil {
+		return err
+	}
+
+	data, err := io.ReadAll(src)
+	if err != nil {
+		return err
+	}
+	decoded, format, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	if format == "jpeg" {
+		decoded = orientImage(decoded, jpegEXIFOrientation(data))
+	}
+
+	bounds := decoded.Bounds()
+	width := max(1, bounds.Dx()*percent/100)
+	height := max(1, bounds.Dy()*percent/100)
+	scaled := image.NewRGBA(image.Rect(0, 0, width, height))
+	imagedraw.ApproxBiLinear.Scale(
+		scaled,
+		scaled.Bounds(),
+		decoded,
+		bounds,
+		imagedraw.Src,
+		nil,
+	)
+
+	var (
+		output      bytes.Buffer
+		contentType string
+	)
+	switch format {
+	case "jpeg":
+		contentType = "image/jpeg"
+		err = jpeg.Encode(&output, scaled, &jpeg.Options{Quality: 82})
+	case "png", "bmp", "webp":
+		contentType = "image/png"
+		err = png.Encode(&output, scaled)
+	default:
+		return fmt.Errorf("unsupported image format %q", format)
+	}
+	if err != nil {
+		return err
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, file.Name, info.ModTime(), bytes.NewReader(output.Bytes()))
+	return nil
+}
+
+func jpegEXIFOrientation(data []byte) int {
+	if len(data) < 2 || data[0] != 0xff || data[1] != 0xd8 {
+		return 1
+	}
+	for offset := 2; offset < len(data); {
+		if data[offset] != 0xff {
+			return 1
+		}
+		for offset < len(data) && data[offset] == 0xff {
+			offset++
+		}
+		if offset >= len(data) {
+			return 1
+		}
+		marker := data[offset]
+		offset++
+		if marker == 0xda || marker == 0xd9 {
+			return 1
+		}
+		if marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7) {
+			continue
+		}
+		if offset+2 > len(data) {
+			return 1
+		}
+		segmentLength := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+		if segmentLength < 2 || offset+segmentLength > len(data) {
+			return 1
+		}
+		if marker == 0xe1 {
+			if orientation := parseEXIFOrientation(data[offset+2 : offset+segmentLength]); orientation != 1 {
+				return orientation
+			}
+		}
+		offset += segmentLength
+	}
+	return 1
+}
+
+func parseEXIFOrientation(segment []byte) int {
+	if len(segment) < 14 || string(segment[:6]) != "Exif\x00\x00" {
+		return 1
+	}
+	tiff := segment[6:]
+	var order binary.ByteOrder
+	switch string(tiff[:2]) {
+	case "II":
+		order = binary.LittleEndian
+	case "MM":
+		order = binary.BigEndian
+	default:
+		return 1
+	}
+	ifdOffset := uint64(order.Uint32(tiff[4:8]))
+	if ifdOffset+2 > uint64(len(tiff)) {
+		return 1
+	}
+	ifd := tiff[ifdOffset:]
+	entryCount := int(order.Uint16(ifd[:2]))
+	for i := 0; i < entryCount; i++ {
+		entryStart := 2 + i*12
+		if entryStart+12 > len(ifd) {
+			return 1
+		}
+		entry := ifd[entryStart : entryStart+12]
+		if order.Uint16(entry[:2]) != 0x0112 || order.Uint16(entry[2:4]) != 3 || order.Uint32(entry[4:8]) < 1 {
+			continue
+		}
+		orientation := int(order.Uint16(entry[8:10]))
+		if orientation >= 1 && orientation <= 8 {
+			return orientation
+		}
+	}
+	return 1
+}
+
+func orientImage(src image.Image, orientation int) image.Image {
+	if orientation < 2 || orientation > 8 {
+		return src
+	}
+	bounds := src.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	outWidth, outHeight := width, height
+	if orientation >= 5 {
+		outWidth, outHeight = height, width
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, outWidth, outHeight))
+	for y := 0; y < outHeight; y++ {
+		for x := 0; x < outWidth; x++ {
+			sx, sy := x, y
+			switch orientation {
+			case 2:
+				sx = width - 1 - x
+			case 3:
+				sx, sy = width-1-x, height-1-y
+			case 4:
+				sy = height - 1 - y
+			case 5:
+				sx, sy = y, x
+			case 6:
+				sx, sy = y, height-1-x
+			case 7:
+				sx, sy = width-1-y, height-1-x
+			case 8:
+				sx, sy = width-1-y, x
+			}
+			dst.Set(x, y, src.At(bounds.Min.X+sx, bounds.Min.Y+sy))
+		}
+	}
+	return dst
 }
 
 func trashPreviewHandler(w http.ResponseWriter, r *http.Request) {
