@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"html/template"
 	"io"
@@ -255,6 +256,16 @@ var persistentState = struct {
 }{starred: make(map[string]starredEntry)}
 
 func main() {
+	var port string
+	flag.StringVar(&port, "p", "8092", "port to listen on")
+	flag.StringVar(&port, "port", "8092", "port to listen on")
+	flag.Parse()
+
+	addr := port
+	if !strings.HasPrefix(addr, ":") {
+		addr = ":" + addr
+	}
+
 	if err := os.MkdirAll(mediaDirectory, 0755); err != nil {
 		log.Fatal(err)
 	}
@@ -299,7 +310,7 @@ func main() {
 	mux.HandleFunc("/", homeHandler)
 
 	server := &http.Server{
-		Addr:              ":8092",
+		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,

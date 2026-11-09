@@ -23,10 +23,13 @@ curl -fsSL https://raw.githubusercontent.com/lorenzolpandolfo/gollery/main/insta
 Run directly during development:
 
 ```bash
-go run main.go
+go run .
+
+# or specify a custom port:
+go run . -p 8080
 ```
 
-The web interface will be available at `http://localhost:8092`.
+By default, the server listens on port `8092` (`http://localhost:8092`).
 
 ## Build
 
@@ -54,11 +57,14 @@ GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o g
 
 ## Running
 
-Run the binary matching your target platform:
+Run the binary matching your platform:
 
 ```bash
+# Default port (8092)
 ./gollery-x86
-# or ./gollery-arm64 / ./gollery-arm32
+
+# Custom port
+./gollery-x86 -p 8080
 ```
 
 ## Storage

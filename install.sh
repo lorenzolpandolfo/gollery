@@ -23,8 +23,9 @@ esac
 URL="https://github.com/$REPO/releases/latest/download/$ASSET"
 
 echo "Downloading Gollery for $ARCH..."
-curl -fsSL "$URL" -o gollery
-chmod +x gollery
+curl -fsSL "$URL" -o gollery.tmp
+chmod +x gollery.tmp
+mv -f gollery.tmp gollery
 
 echo "Gollery installed successfully!"
 echo "Start it with:"
