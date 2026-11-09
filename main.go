@@ -135,11 +135,22 @@ type Folder struct {
 	TrashID      string
 	OriginalPath string
 	DeletedAt    time.Time
+	ItemCount    int
+	Size         int64
 }
 
 func (f Folder) Location() string { return locationLabel(f.Dir) }
 
 func (f Folder) TrashDateLabel() string { return f.DeletedAt.Local().Format("02/01/2006 15:04") }
+
+func (f Folder) SizeLabel() string { return formatBytes(f.Size) }
+
+func (f Folder) ItemsLabel() string {
+	if f.ItemCount == 1 {
+		return "1 item"
+	}
+	return fmt.Sprintf("%d itens", f.ItemCount)
+}
 
 func locationLabel(dir string) string {
 	if dir == "" {
@@ -1421,6 +1432,43 @@ func parseStoredFilename(serverName string) (string, string, bool) {
 	return "", "", false
 }
 
+// folderStats calcula a quantidade de itens diretamente dentro da pasta e o tamanho total (recursivo) de seus arquivos.
+func folderStats(rel string) (int, int64) {
+	full := fullPath(rel)
+	entries, err := os.ReadDir(full)
+	if err != nil {
+		return 0, 0
+	}
+
+	var itemCount int
+	for _, entry := range entries {
+		if validSegment(entry.Name()) {
+			itemCount++
+		}
+	}
+
+	var totalSize int64
+	_ = filepath.WalkDir(full, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if path != full && !validSegment(entry.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if validSegment(entry.Name()) {
+			if info, err := entry.Info(); err == nil {
+				totalSize += info.Size()
+			}
+		}
+		return nil
+	})
+
+	return itemCount, totalSize
+}
+
 // listDir lista as pastas e os arquivos diretamente dentro de dir.
 func listDir(dir string) ([]Folder, []File, error) {
 	if !dirExists(dir) {
@@ -1449,11 +1497,14 @@ func listDir(dir string) ([]Folder, []File, error) {
 		}
 
 		if entry.IsDir() {
+			itemCount, size := folderStats(joinRel(dir, name))
 			folders = append(folders, Folder{
 				Name:        name,
 				Path:        joinRel(dir, name),
 				Dir:         dir,
 				CreatedDate: info.ModTime(),
+				ItemCount:   itemCount,
+				Size:        size,
 			})
 
 			continue
@@ -1520,12 +1571,15 @@ func searchLibrary(query string) ([]Folder, []File, error) {
 
 		if entry.IsDir() {
 			if strings.Contains(foldString(name), needle) {
+				itemCount, size := folderStats(rel)
 				folders = append(folders, Folder{
 					Name:        name,
 					Path:        rel,
 					Dir:         dir,
 					Located:     true,
 					CreatedDate: info.ModTime(),
+					ItemCount:   itemCount,
+					Size:        size,
 				})
 			}
 
@@ -1696,6 +1750,7 @@ func starredItems() ([]Folder, []File, error) {
 			continue
 		}
 
+		itemCount, size := folderStats(path)
 		folders = append(folders, Folder{
 			Name:        pathpkg.Base(path),
 			Path:        path,
@@ -1703,6 +1758,8 @@ func starredItems() ([]Folder, []File, error) {
 			Located:     true,
 			CreatedDate: info.ModTime(),
 			Starred:     true,
+			ItemCount:   itemCount,
+			Size:        size,
 		})
 	}
 

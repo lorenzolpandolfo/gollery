@@ -510,6 +510,10 @@
       <span class="file-name">{{ .Name }}</span>
       {{ if .Located }}<span class="file-location">{{ .Location }}</span>{{ end }}
     </span>
+    {{ if not .Trashed }}
+    <span class="folder-items">{{ .ItemsLabel }}</span>
+    <span class="folder-size">{{ .SizeLabel }}</span>
+    {{ end }}
   {{ if .Trashed }}</div>{{ else }}</a>{{ end }}
 
   <div class="card-actions">

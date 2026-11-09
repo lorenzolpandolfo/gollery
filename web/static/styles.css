@@ -1346,6 +1346,11 @@ html[data-view="list"] .file-card.folder-card {
   color: var(--text);
 }
 
+.folder-items,
+.folder-size {
+  display: none;
+}
+
 html:not([data-view="list"]) .folder-card {
   display: block;
   min-height: 180px;
@@ -1510,6 +1515,30 @@ html[data-view="list"] .folder-card {
 
 html[data-view="list"] .folder-link {
   padding: 12px 8px 12px 18px;
+  gap: 16px;
+}
+
+html[data-view="list"] .folder-card .file-name-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+html[data-view="list"] .folder-items,
+html[data-view="list"] .folder-size {
+  display: block;
+  white-space: nowrap;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+html[data-view="list"] .folder-items {
+  width: 90px;
+}
+
+html[data-view="list"] .folder-size {
+  width: 130px;
 }
 
 html[data-view="list"] .empty-state {
@@ -2123,6 +2152,13 @@ html[data-view="list"] .file-card.drag-over {
 
   html[data-view="list"] .file-size {
     width: 70px;
+    font-size: 12px;
+    opacity: 0.75;
+  }
+
+  html[data-view="list"] .folder-items,
+  html[data-view="list"] .folder-size {
+    width: auto;
     font-size: 12px;
     opacity: 0.75;
   }

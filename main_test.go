@@ -674,3 +674,79 @@ func TestTrashCardTemplatesRenderRestoreActions(t *testing.T) {
 		})
 	}
 }
+
+func TestFolderStatsAndLabels(t *testing.T) {
+	useTemporaryMedia(t)
+
+	// Cria pasta vazia
+	if err := os.Mkdir(fullPath("empty"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	items, size := folderStats("empty")
+	if items != 0 || size != 0 {
+		t.Fatalf("empty folder stats = (%d, %d), want (0, 0)", items, size)
+	}
+	fEmpty := Folder{ItemCount: items, Size: size}
+	if fEmpty.ItemsLabel() != "0 itens" || fEmpty.SizeLabel() != "0 B" {
+		t.Fatalf("empty folder labels = (%q, %q)", fEmpty.ItemsLabel(), fEmpty.SizeLabel())
+	}
+
+	// Cria pasta com arquivos e subpasta
+	if err := os.MkdirAll(fullPath("parent/child"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fullPath("parent/file1.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fullPath("parent/child/file2.txt"), []byte("world!"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Arquivo oculto que deve ser ignorado
+	if err := os.WriteFile(fullPath("parent/.hidden"), []byte("secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	items, size = folderStats("parent")
+	if items != 2 {
+		t.Fatalf("parent items count = %d, want 2", items)
+	}
+	if size != 11 {
+		t.Fatalf("parent size = %d, want 11", size)
+	}
+	fParent := Folder{ItemCount: items, Size: size}
+	if fParent.ItemsLabel() != "2 itens" {
+		t.Fatalf("parent ItemsLabel() = %q, want '2 itens'", fParent.ItemsLabel())
+	}
+	if fParent.SizeLabel() != "11 B" {
+		t.Fatalf("parent SizeLabel() = %q, want '11 B'", fParent.SizeLabel())
+	}
+
+	// Teste com 1 item
+	fSingle := Folder{ItemCount: 1, Size: 1024}
+	if fSingle.ItemsLabel() != "1 item" {
+		t.Fatalf("single ItemsLabel() = %q, want '1 item'", fSingle.ItemsLabel())
+	}
+	if fSingle.SizeLabel() != "1,0 KB" {
+		t.Fatalf("single SizeLabel() = %q, want '1,0 KB'", fSingle.SizeLabel())
+	}
+}
+
+func TestFolderCardRendersItemsAndSize(t *testing.T) {
+	data := Folder{
+		Name:      "photos",
+		Path:      "photos",
+		ItemCount: 5,
+		Size:      1048576,
+	}
+	var output bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&output, "folder-card", data); err != nil {
+		t.Fatalf("render folder-card: %v", err)
+	}
+	rendered := output.String()
+	if !strings.Contains(rendered, "folder-items") || !strings.Contains(rendered, "5 itens") {
+		t.Fatalf("folder-card missing items: %s", rendered)
+	}
+	if !strings.Contains(rendered, "folder-size") || !strings.Contains(rendered, "1,0 MB") {
+		t.Fatalf("folder-card missing size: %s", rendered)
+	}
+}
